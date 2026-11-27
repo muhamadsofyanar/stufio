@@ -49,7 +49,16 @@ def instagram_direct():
     return os.getenv("INSTAGRAM_LOGIN_MODE","facebook").strip().lower()=="direct"
 
 
+def instagram_unified():
+    return os.getenv("INSTAGRAM_LOGIN_MODE","facebook").strip().lower()=="unified"
+
+
 def provider_for(key):
+    if key=="instagram" and instagram_unified():
+        return Provider("Instagram","Akun Professional (Unified Login)",
+                        "https://www.facebook.com/v25.0/dialog/oauth",
+                        "https://graph.facebook.com/v25.0/oauth/access_token",
+                        "instagram_basic,instagram_content_publish")
     if key=="instagram" and instagram_direct():
         return Provider("Instagram","Akun Professional (Business/Creator)",
                         "https://www.instagram.com/oauth/authorize",
@@ -69,6 +78,10 @@ def settings(key):
     if (parts.scheme != "https" or not parts.hostname or parts.username is not None
             or parts.path or parts.query or parts.fragment or not client or not secret):
         return None
+    if key=="instagram" and instagram_unified():
+        config_id=os.getenv("INSTAGRAM_CONFIG_ID","").strip()
+        if not config_id.isascii() or not config_id.isdecimal():
+            return None
     return client, secret, f"{origin}/akun/oauth/{key}/callback"
 
 
@@ -77,6 +90,11 @@ def authorization_url(key, config, state, verifier):
     client, _, callback = config
     params = {provider.client_field: client, "redirect_uri": callback, "scope": provider.scope,
               "response_type": "code", "state": state}
+    if key=="instagram" and instagram_unified():
+        # Permissions and asset selection are defined by the Meta configuration.
+        params.pop("scope",None)
+        params.update(config_id=os.environ["INSTAGRAM_CONFIG_ID"].strip(),
+                      override_default_response_type="true")
     if provider.pkce:
         params["code_challenge"] = base64.urlsafe_b64encode(
             hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -118,6 +136,11 @@ def exchange(key, config, code, verifier):
         data = api("POST", provider.token, data=data, **options)
     if not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise ValueError("Platform tidak memberikan token akses.")
+    if key=="instagram" and instagram_unified():
+        # Business Login can return a system-user token; do not exchange it as
+        # a short-lived Facebook user token.
+        data["instagram_mode"]="unified"
+        return data
     if key=="instagram" and instagram_direct():
         short=data
         data=api("GET","https://graph.instagram.com/access_token",
@@ -147,6 +170,42 @@ def accounts(key, token):
     def get(url, **params):
         return api("GET", url, headers=headers, params=params)
 
+    if key=="instagram" and token.get("instagram_mode")=="unified":
+        meta=unified_token_info(token)
+        targets=set()
+        for grant in meta.get("granular_scopes",[]):
+            if grant.get("scope")=="instagram_basic":
+                targets.update(str(i) for i in grant.get("target_ids",[]) if str(i).isascii() and str(i).isdecimal())
+        publish_targets=set()
+        for grant in meta.get("granular_scopes",[]):
+            if grant.get("scope")=="instagram_content_publish":
+                publish_targets.update(str(i) for i in grant.get("target_ids",[]) if str(i).isascii() and str(i).isdecimal())
+        if not targets:
+            # If Meta does not report selected asset IDs, enumerate assigned IG accounts.
+            cursor=None
+            seen=set()
+            while True:
+                params={"fields":"id,username","limit":100}
+                if cursor: params["after"]=cursor
+                result=get("https://graph.facebook.com/v25.0/me/assigned_instagram_accounts",**params)
+                targets.update(str(row["id"]) for row in result.get("data",[]) if str(row.get("id","")).isascii() and str(row.get("id","")).isdecimal())
+                paging=result.get("paging",{})
+                if not paging.get("next"): break
+                cursor=paging.get("cursors",{}).get("after")
+                if not cursor or cursor in seen: raise ValueError("Daftar Instagram tidak lengkap.")
+                seen.add(cursor)
+        rows=[]
+        for target in sorted(targets):
+            row=get(f"https://graph.facebook.com/v25.0/{target}",fields="id,username")
+            if str(row.get("id")) != target or not row.get("username"):
+                continue
+            creds={**token,"can_publish":"instagram_content_publish" in meta.get("scopes",[]) and (not publish_targets or target in publish_targets)}
+            expires=meta.get("expires_at")
+            if isinstance(expires,int) and expires>0:
+                import time
+                creds["expires_in"]=max(1,expires-int(time.time()))
+            rows.append((target,row["username"],creds))
+        return rows
     if key=="instagram" and token.get("instagram_mode")=="direct":
         row=get("https://graph.instagram.com/v25.0/me",fields="user_id,username")
         return [(row.get("user_id") or row.get("id"),row.get("username"),token)]
@@ -216,7 +275,21 @@ def accounts(key, token):
         seen.add(cursor)
         params["bookmark"] = cursor
 
+def unified_token_info(token):
+    config=settings("instagram")
+    if not config: raise ValueError("Konfigurasi Instagram Unified Login belum lengkap.")
+    client,secret,_=config
+    result=api("GET","https://graph.facebook.com/v25.0/debug_token",
+               params={"input_token":token["access_token"]},
+               headers={"Authorization":"Bearer "+client+"|"+secret}).get("data",{})
+    if result.get("is_valid") is not True or str(result.get("app_id"))!=client:
+        raise ValueError("Token Instagram tidak valid untuk aplikasi ini.")
+    return result
+
+
 def granted_scopes(key, token):
+    if key=="instagram" and token.get("instagram_mode")=="unified":
+        return set(unified_token_info(token).get("scopes",[]))
     if key=="instagram" and token.get("instagram_mode")=="direct":
         value=token.get("permissions") or token.get("scope")
         if isinstance(value,str): return set(value.replace(","," ").split())
