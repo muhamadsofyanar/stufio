@@ -1,6 +1,6 @@
-# Taysriul | Publikasi dan layanan pelanggan, Tahap 1–6
+# Taysriul | Rilis gabungan Tahap 1–8
 
-Panduan deploy dan uji inbox tersedia di RILIS-LAYANAN.md. Panduan editor dan publikasi ada di RILIS-PUBLIKASI.md.
+Baca RILIS-AKHIR.md untuk migrasi, konfigurasi opsional, batas integrasi, dan langkah uji Tahap 7–8. Panduan rilis sebelumnya tetap tersedia.
 
 Aplikasi Flask/Jinja untuk mengelola akun sosial, menulis draf, dan menjadwalkan publikasi per workspace. Gunicorn melayani web, PostgreSQL menyimpan media serta antrean, dan proses worker mengirim kiriman. Antarmuka berbahasa Indonesia dengan jadwal WIB.
 

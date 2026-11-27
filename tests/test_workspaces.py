@@ -367,3 +367,67 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.client.get("/layanan").status_code,200)
         self.assertEqual(self.post("/layanan/1",action="open").status_code,403)
         self.assertEqual(self.post("/layanan/pengaturan",action="saved",body="Denied").status_code,403)
+
+    def test_final_automation_human_control_ai_and_report(self):
+        import workflows
+        from datetime import datetime,timezone
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential)
+                VALUES('facebook','page','My Page',public.pgp_sym_encrypt(%s,%s))""",('{"access_token":"test"}',self.studio.app.secret_key))
+        self.post("/otomasi",action="create",trigger="message",account="1",name="Jam layanan",keyword="jam",body="Buka jam 9")
+        self.post("/otomasi",action="toggle",id="1")
+        self.assertIn(b"Buka jam 9",self.post("/otomasi",action="simulate",trigger="message",account="1",sample="Jam berapa?").data)
+        def sync(mid):
+            payload={"data":[{"id":"thread","messages":{"data":[{"id":mid,"created_time":datetime.now(timezone.utc).isoformat(),"message":"Jam berapa?","from":{"id":"customer","name":"Customer"}}]}}]}
+            with patch("workspace_views.api",return_value=payload): self.post("/aktivitas/inbox/1/sync")
+        sync("m1")
+        sync("m1")
+        ctx=self.studio.worker_workspace.set(self.space)
+        self.addCleanup(self.studio.worker_workspace.reset,ctx)
+        with patch.dict(os.environ,{"FACEBOOK_MESSENGER_ENABLED":"1"}), patch("workflows.api",return_value={"message_id":"out1"}) as provider:
+            self.assertTrue(workflows.process(self.studio.connect,self.studio.app.secret_key))
+            self.post("/layanan/1",action="takeover")
+            sync("m2")
+            self.assertTrue(workflows.process(self.studio.connect,self.studio.app.secret_key))
+            self.assertFalse(workflows.process(self.studio.connect,self.studio.app.secret_key))
+            self.assertEqual(provider.call_count,1)
+        self.post("/otomasi",action="knowledge",title="Jam kerja",body="Kami buka jam 9.")
+        with patch.dict(os.environ,{"TAYSRIUL_AI_KEY":"example","TAYSRIUL_AI_MODEL":"example"}),patch("workflows.requests.post") as model:
+            model.return_value.json.return_value={"choices":[{"message":{"content":'{"source_id":1,"quote":"Kami buka jam 9."}'}}]}
+            self.assertIn(b"Kami buka jam 9.",self.post("/layanan/1/asisten").data)
+            model.return_value.json.return_value={"choices":[{"message":{"content":'{"source_id":1,"quote":"Tidak ada di sumber"}'}}]}
+            self.assertEqual(self.post("/layanan/1/asisten").status_code,302)
+        self.assertIn(b"Belum tersedia",self.client.get("/laporan").data)
+        self.assertIn(b"Belum ditugaskan,1,1,0,1",self.client.get("/laporan?csv=layanan").data)
+        self.assertEqual(self.client.get("/laporan?start=2027-02-28&end=2027-01-01").status_code,400)
+
+    def test_final_signed_integration_and_private_reply(self):
+        import workflows,json,time,hmac,hashlib
+        from datetime import datetime,timezone
+        self.post("/otomasi",action="hook")
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            secret=db.execute("SELECT public.pgp_sym_decrypt(hook_key::bytea,%s) AS key FROM flow_config",(self.studio.app.secret_key,)).fetchone()["key"]
+            db.execute("INSERT INTO oauth_accounts(platform,external_id,title,credential) VALUES('instagram','ig','IG',public.pgp_sym_encrypt(%s,%s))",('{"access_token":"test"}',self.studio.app.secret_key))
+        self.post("/otomasi",action="create",trigger="comment",keyword="info",body="Detail",name="Balas")
+        self.post("/otomasi",action="toggle",id=1)
+        def send(kind,payload,key):
+            path=f"/integrasi/{self.space}/{kind}"
+            ts=str(int(time.time()))
+            raw=json.dumps(payload).encode()
+            signature=hmac.new(key.encode(),ts.encode()+b"."+path.encode()+b"."+raw,hashlib.sha256).hexdigest()
+            return self.client.post(path,data=raw,content_type="application/json",headers={"X-Taysriul-Time":ts,"X-Taysriul-Signature":signature})
+        payload={"account":1,"comment_id":"12345","sender_id":"456","text":"info","created_time":datetime.now(timezone.utc).isoformat()}
+        self.assertEqual(send("komentar",payload,"wrong").status_code,403)
+        for _ in range(2): self.assertEqual(send("komentar",payload,secret).status_code,204)
+        ctx=self.studio.worker_workspace.set(self.space)
+        self.addCleanup(self.studio.worker_workspace.reset,ctx)
+        with patch.dict(os.environ,{"INSTAGRAM_PRIVATE_REPLIES_ENABLED":"1"}),patch("workflows.api",return_value={"message_id":"dm","recipient_id":"456"}) as api:
+            self.assertTrue(workflows.process(self.studio.connect,self.studio.app.secret_key))
+            self.assertFalse(workflows.process(self.studio.connect,self.studio.app.secret_key))
+            self.assertEqual(api.call_count,1)
+        self.assertIn(b"Detail",self.client.get("/layanan?thread=1").data)
+        metric={"account":1,"date":"2026-11-01","metric":"reach","value":0}
+        self.assertEqual(send("metrik",metric,secret).status_code,204)
+        self.assertIn(b"reach,0",self.client.get("/laporan?start=2026-11-01&end=2026-11-01&csv=metrik").data)

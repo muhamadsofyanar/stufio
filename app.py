@@ -1,3 +1,5 @@
+import workflows
+import reports
 import service_desk
 import calendar
 import csv
@@ -62,6 +64,7 @@ def prepare_schema(db, wid):
     if db.execute("SELECT 1 FROM public.workspace_migrations WHERE workspace=%s AND version=1",(wid,)).fetchone():
         set_workspace(db,wid)
         service_desk.migrate(db,wid)
+        workflows.migrate(db,wid)
         return
     schema = sql.Identifier(schema_for(wid))
     db.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
@@ -122,6 +125,7 @@ def prepare_schema(db, wid):
 
     db.execute("INSERT INTO public.workspace_migrations(workspace,version) VALUES(%s,1)",(wid,))
     service_desk.migrate(db,wid)
+    workflows.migrate(db,wid)
 
 
 with raw_connection() as db:
@@ -176,6 +180,10 @@ def telegram(token, method, data, files=None):
 
 @app.before_request
 def protect():
+    if request.endpoint=="integration_comment":
+        g.workspace_id=request.view_args["wid"]
+        validate_public_workspace(g.workspace_id)
+        return
     session.setdefault("csrf", secrets.token_urlsafe(24))
     if request.method == "POST" and not hmac.compare_digest(
             str(request.form.get("csrf","")).encode(), session["csrf"].encode()):
@@ -865,6 +873,8 @@ def deliver():
 from workspace_views import register
 register(app, connect, prepare_schema, record_event)
 service_desk.register(app,connect)
+workflows.register(app,connect)
+reports.register(app,connect)
 
 
 if __name__=="__main__":
@@ -883,6 +893,7 @@ if __name__=="__main__":
                     db.execute("""INSERT INTO worker_status VALUES (1,now())
                                ON CONFLICT(id) DO UPDATE SET seen=excluded.seen""")
             worked = deliver() or worked
+            worked = workflows.process(connect,app.secret_key) or worked
         if ping:
             last_ping=time.monotonic()
         if not worked:

@@ -17,7 +17,7 @@ def root(platform, credentials):
     return "https://graph.facebook.com/v25.0"
 
 
-def comments(platform, account, credentials, headers):
+def comments(platform, account, credentials, headers, observe=None):
     base = root(platform, credentials)
     posts_edge, replies_edge = ("threads","replies") if platform=="threads" else ("media","comments")
     recent = api("GET", f"{base}/{account}/{posts_edge}", headers=headers, params={"fields":"id","limit":10})
@@ -25,8 +25,10 @@ def comments(platform, account, credentials, headers):
     for post in recent["data"]:
         parent = post["id"]
         replies = api("GET", f"{base}/{parent}/{replies_edge}", headers=headers,
-                      params={"fields":"id,text,username","limit":50})
+                      params={"fields":"id,text,username,timestamp,from" if platform=="instagram" else "id,text,username,timestamp","limit":50})
         for reply in replies["data"]:
+            if observe and reply.get("timestamp"):
+                observe(reply)
             items.append((reply["id"], reply.get("username") or platform, reply.get("text") or "Lampiran", parent, reply["id"]))
     return items
 

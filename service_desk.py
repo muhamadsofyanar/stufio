@@ -1,4 +1,5 @@
 """Workspace-scoped customer service and Messenger conversation history."""
+import workflows
 import json
 import os
 import secrets
@@ -98,6 +99,8 @@ def ingest(db, aid, page_id, thread, older=False):
             DO NOTHING RETURNING sent_at""",(tid,m["id"],m.get("created_time"),outbound,m.get("message",""),json.dumps(attachments))).fetchone()
         if added:
             timestamp=added["sent_at"]
+            if not outbound and not older and m.get("created_time"):
+                workflows.capture(db,"message",aid,m["id"],m.get("message",""),timestamp,customer["id"],tid)
             db.execute("UPDATE desk_threads SET last_message=greatest(last_message,%s) WHERE id=%s",(timestamp,tid))
             if not outbound and row["resolved"] and timestamp>row["resolved"]:
                 db.execute("UPDATE desk_threads SET resolved=NULL WHERE id=%s",(tid,))
@@ -123,7 +126,7 @@ def register(app,connect):
                 EXISTS(SELECT 1 FROM desk_messages m WHERE m.thread=t.id AND strpos(lower(m.body),lower(%s))>0))
                 ORDER BY t.last_message DESC NULLS LAST,t.id DESC LIMIT 200""",(account,account,status,status,query,query)).fetchall()
             selected=selected or (rows[0]["id"] if rows else None)
-            current=db.execute("""SELECT t.*,c.name,c.notes,c.external_id,c.account,a.title,a.active,u.login
+            current=db.execute("""SELECT t.*,c.name,c.notes,c.external_id,c.account,a.title,a.active,a.platform,u.login
                 FROM desk_threads t JOIN desk_contacts c ON c.id=t.contact JOIN oauth_accounts a ON a.id=c.account
                 LEFT JOIN public.studio_users u ON u.id=t.owner_id WHERE t.id=%s""",(selected,)).fetchone()
             if selected and not current: abort(404)
@@ -174,7 +177,7 @@ def register(app,connect):
         action=request.form.get("action")
         with connect() as db:
             row=db.execute("""SELECT t.*,c.external_id,a.active,a.external_id AS page_id,
-                a.id AS account FROM desk_threads t JOIN desk_contacts c ON c.id=t.contact
+                a.id AS account,a.platform FROM desk_threads t JOIN desk_contacts c ON c.id=t.contact
                 JOIN oauth_accounts a ON a.id=c.account WHERE t.id=%s FOR UPDATE OF t""",(tid,)).fetchone()
             if not row: abort(404)
             if action=="assign":
@@ -184,6 +187,9 @@ def register(app,connect):
                 if g.role=="editor" and row["owner_id"] not in (None,session["user"]): abort(403)
                 if member!=row["owner_id"]: assign(db,tid,agent)
             elif g.role=="editor" and row["owner_id"] not in (None,session["user"]): abort(403)
+            elif action in ("takeover","resume"):
+                db.execute("UPDATE desk_threads SET human_control=%s WHERE id=%s",(action=="takeover",tid))
+                log(db,tid,"Petugas mengambil alih" if action=="takeover" else "Otomasi dilanjutkan")
             elif action in ("resolve","open"):
                 if bool(row["resolved"])!=(action=="resolve"):
                     db.execute("UPDATE desk_threads SET resolved=CASE WHEN %s THEN now() ELSE NULL END WHERE id=%s",(action=="resolve",tid))
@@ -196,7 +202,8 @@ def register(app,connect):
                 db.execute("UPDATE desk_threads SET tags=%s WHERE id=%s",(tags,tid))
                 log(db,tid,"Profil dan tag diperbarui")
             elif action=="send":
-                if not row["active"] or os.getenv("FACEBOOK_MESSENGER_ENABLED")!="1": abort(403)
+                db.execute("UPDATE desk_threads SET human_control=true WHERE id=%s",(tid,))
+                if row["platform"]!="facebook" or not row["active"] or os.getenv("FACEBOOK_MESSENGER_ENABLED")!="1": abort(403)
                 body=request.form.get("body","").strip()
                 nonce=request.form.get("nonce","")
                 if not 1<=len(body)<=2000 or not 20<=len(nonce)<=80: abort(400)

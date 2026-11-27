@@ -9,6 +9,7 @@ import os
 from flask import session, Response, abort, flash, g, redirect, render_template, request
 from werkzeug.security import generate_password_hash
 
+import workflows
 import service_desk
 import meta_activity
 from social_oauth import api
@@ -127,7 +128,12 @@ def register(app, connect, prepare_schema, record_event):
                 if page=="analitik" and platform in ("instagram","facebook"):
                     items = meta_activity.stats(platform,channel,credentials,headers)
                 elif page=="inbox" and platform in ("instagram","threads"):
-                    items = meta_activity.comments(platform,channel,credentials,headers)
+                    def observe(comment):
+                        if platform=="instagram" and comment.get("from",{}).get("id") not in (None,channel):
+                            timestamp=datetime.fromisoformat(comment["timestamp"])
+                            if timestamp.tzinfo:
+                                workflows.capture(db,"comment",aid,comment["id"],comment.get("text",""),timestamp,comment["id"],customer=comment["from"]["id"])
+                    items = meta_activity.comments(platform,channel,credentials,headers,observe)
                 elif platform=="threads":
                     abort(404)
                 elif platform == "facebook":
