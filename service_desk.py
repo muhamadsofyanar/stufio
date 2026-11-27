@@ -1,5 +1,6 @@
 """Workspace-scoped customer service and Messenger conversation history."""
 import workflows
+import integrations
 import json
 import os
 import secrets
@@ -59,7 +60,7 @@ def assign(db, thread, agent, actor=None):
     log(db,thread,"Ditugaskan kepada "+agent["login"],agent["member"],actor)
 
 
-def ingest(db, aid, page_id, thread, older=False):
+def ingest(db, aid, page_id, thread, older=False, source="Messenger"):
     messages=thread.get("messages",{}).get("data",[])
     people=thread.get("participants",{}).get("data",[])
     customer=next((p for p in people if p.get("id") and p["id"]!=page_id),None)
@@ -79,7 +80,7 @@ def ingest(db, aid, page_id, thread, older=False):
     if new or older:
         db.execute("UPDATE desk_threads SET older_cursor=%s WHERE id=%s",(cursor,tid))
     if new:
-        log(db,tid,"Percakapan diterima",actor="Messenger")
+        log(db,tid,"Percakapan diterima",actor=source)
         policy=db.execute("SELECT * FROM desk_policy WHERE id=1 FOR UPDATE").fetchone()
         agents=eligible(db) if policy["routing"] else []
         if agents:
@@ -99,16 +100,47 @@ def ingest(db, aid, page_id, thread, older=False):
             DO NOTHING RETURNING sent_at""",(tid,m["id"],m.get("created_time"),outbound,m.get("message",""),json.dumps(attachments))).fetchone()
         if added:
             timestamp=added["sent_at"]
-            if not outbound and not older and m.get("created_time"):
+            if source=="Messenger" and not outbound and not older and m.get("created_time"):
                 workflows.capture(db,"message",aid,m["id"],m.get("message",""),timestamp,customer["id"],tid)
             db.execute("UPDATE desk_threads SET last_message=greatest(last_message,%s) WHERE id=%s",(timestamp,tid))
             if not outbound and row["resolved"] and timestamp>row["resolved"]:
                 db.execute("UPDATE desk_threads SET resolved=NULL WHERE id=%s",(tid,))
-                log(db,tid,"Dibuka kembali oleh pesan pelanggan",row["owner_id"],"Messenger")
+                log(db,tid,"Dibuka kembali oleh pesan pelanggan",row["owner_id"],source)
                 row["resolved"]=None
 
 
 def register(app,connect):
+    @app.post("/integrasi/<int:wid>/balaschat")
+    def balaschat_webhook(wid):
+        request.max_content_length = 256 * 1024
+        settings = integrations.config("BALASCHAT", wid)
+        raw = request.get_data()
+        if not integrations.valid_signature(raw, request.headers.get("X-BalasChat-Signature", ""),
+                                            settings.get("secret")):
+            abort(403)
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            abort(400)
+        if payload.get("event") == "webhook.test":
+            return "", 204
+        if payload.get("event") != "message.received" or payload.get("channel") != "waba":
+            return "", 204
+        try:
+            workspace, number = integrations.balas_account(settings)
+            if payload.get("workspace") != workspace or str(payload.get("account")) != number:
+                abort(403)
+            thread = integrations.waba_message(payload)
+        except (ValueError, TypeError, KeyError):
+            abort(400)
+        with connect() as db:
+            aid = db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential)
+                VALUES('balaschat_waba',%s,%s,public.pgp_sym_encrypt('{}',%s))
+                ON CONFLICT(platform,external_id) DO UPDATE SET title=excluded.title RETURNING id""",
+                (f"{workspace}:{number}",f"WhatsApp Business · {workspace}",app.secret_key)).fetchone()["id"]
+            ingest(db, aid, number, thread, source="BalasChat")
+        return "", 204
+
+
     @app.get("/layanan")
     def desk():
         selected=request.args.get("thread",type=int)
@@ -116,7 +148,7 @@ def register(app,connect):
         if status not in ("all","open","done"): abort(400)
         with connect() as db:
             agents=eligible(db)
-            accounts=db.execute("SELECT a.id,a.title,a.active,p.after_cursor FROM oauth_accounts a LEFT JOIN desk_pages p ON p.account=a.id WHERE platform='facebook' ORDER BY title").fetchall()
+            accounts=db.execute("SELECT a.id,a.title,a.active,a.platform,p.after_cursor FROM oauth_accounts a LEFT JOIN desk_pages p ON p.account=a.id WHERE platform IN ('facebook','balaschat_waba') ORDER BY title").fetchall()
             query=request.args.get("q","").strip()[:160]
             account=request.args.get("account",type=int)
             rows=db.execute("""SELECT t.*,c.name,a.title,u.login FROM desk_threads t JOIN desk_contacts c ON t.contact=c.id
@@ -142,7 +174,8 @@ def register(app,connect):
         return render_template("studio.html",page="layanan",threads=rows,current=current,messages=messages,events=events,
             agents=agents,accounts=accounts,replies=replies,policy=policy,reports=reports,notices=notices,
             office_open=policy["opens"]<=local<policy["closes"],nonce=secrets.token_urlsafe(24),
-            send_enabled=os.getenv("FACEBOOK_MESSENGER_ENABLED")=="1")
+            send_enabled=os.getenv("FACEBOOK_MESSENGER_ENABLED")=="1",
+            waba_enabled=bool(integrations.config("BALASCHAT", g.workspace_id).get("token")))
 
     @app.post("/layanan/pengaturan")
     def desk_settings():
@@ -203,21 +236,36 @@ def register(app,connect):
                 log(db,tid,"Profil dan tag diperbarui")
             elif action=="send":
                 db.execute("UPDATE desk_threads SET human_control=true WHERE id=%s",(tid,))
-                if row["platform"]!="facebook" or not row["active"] or os.getenv("FACEBOOK_MESSENGER_ENABLED")!="1": abort(403)
+                if not row["active"]: abort(403)
+                is_waba = row["platform"] == "balaschat_waba"
+                if is_waba:
+                    settings = integrations.config("BALASCHAT", g.workspace_id)
+                    if not settings.get("token"): abort(403)
+                    recent = db.execute("""SELECT 1 FROM desk_messages WHERE thread=%s AND NOT outbound
+                        AND sent_at > now()-interval '24 hours' LIMIT 1""",(tid,)).fetchone()
+                    if not recent:
+                        flash("Balasan teks WhatsApp tersedia hingga 24 jam sejak pesan terakhir pelanggan.")
+                        return redirect(url_for("desk",thread=tid))
+                elif row["platform"]!="facebook" or os.getenv("FACEBOOK_MESSENGER_ENABLED")!="1":
+                    abort(403)
                 body=request.form.get("body","").strip()
                 nonce=request.form.get("nonce","")
                 if not 1<=len(body)<=2000 or not 20<=len(nonce)<=80: abort(400)
-                secret=db.execute("SELECT public.pgp_sym_decrypt(credential,%s) AS value FROM oauth_accounts WHERE id=%s AND active FOR SHARE",(app.secret_key,row["account"])).fetchone()
-                if not secret: abort(409)
-                token=json.loads(secret["value"])["access_token"]
+                if not is_waba:
+                    secret=db.execute("SELECT public.pgp_sym_decrypt(credential,%s) AS value FROM oauth_accounts WHERE id=%s AND active FOR SHARE",(app.secret_key,row["account"])).fetchone()
+                    if not secret: abort(409)
+                    token=json.loads(secret["value"])["access_token"]
                 pending=db.execute("""INSERT INTO desk_messages(thread,nonce,outbound,body,state) VALUES(%s,%s,true,%s,'Periksa platform')
                     ON CONFLICT(nonce) DO NOTHING RETURNING id""",(tid,nonce,body)).fetchone()
                 if not pending: abort(409)
             else: abort(400)
         if action=="send":
             try:
-                result=api("POST",f"https://graph.facebook.com/v25.0/{row['page_id']}/messages",
-                    headers={"Authorization":"Bearer "+token},json={"recipient":{"id":row["external_id"]},"messaging_type":"RESPONSE","message":{"text":body}})
+                if is_waba:
+                    result = integrations.send_waba(settings, row["page_id"], row["external_id"], body)
+                else:
+                    result=api("POST",f"https://graph.facebook.com/v25.0/{row['page_id']}/messages",
+                        headers={"Authorization":"Bearer "+token},json={"recipient":{"id":row["external_id"]},"messaging_type":"RESPONSE","message":{"text":body}})
                 if not result.get("message_id"): raise ValueError("Pengiriman belum terkonfirmasi.")
                 with connect() as db:
                     db.execute("SELECT id FROM desk_threads WHERE id=%s FOR UPDATE",(tid,))
@@ -225,7 +273,7 @@ def register(app,connect):
                     db.execute("UPDATE desk_messages SET state='Terkirim',remote_id=%s WHERE id=%s",(result["message_id"],pending["id"]))
                     db.execute("UPDATE desk_threads SET last_message=greatest(last_message,now()) WHERE id=%s",(tid,))
                     log(db,tid,"Balasan terkirim")
-            except ValueError as e: flash(str(e))
+            except (ValueError, RuntimeError) as e: flash(str(e))
         return redirect(url_for("desk",thread=tid))
 
     @app.post("/layanan/<int:tid>/riwayat")

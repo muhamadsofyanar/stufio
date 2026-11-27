@@ -1,3 +1,4 @@
+import integrations
 import workflows
 import reports
 import service_desk
@@ -180,7 +181,7 @@ def telegram(token, method, data, files=None):
 
 @app.before_request
 def protect():
-    if request.endpoint=="integration_comment":
+    if request.endpoint in {"integration_comment", "balaschat_webhook"}:
         g.workspace_id=request.view_args["wid"]
         validate_public_workspace(g.workspace_id)
         return
@@ -259,7 +260,7 @@ def dashboard(page="ringkasan"):
         with connect() as db:
             channels = db.execute("SELECT id,title,platform,active FROM channels ORDER BY active DESC,title,id").fetchall()
             accounts = db.execute("""SELECT id,platform,title,external_id,active,publish_ready,sync_result,synced_at,(expires_at <= now() AND NOT refreshable) AS expired
-                                      FROM oauth_accounts ORDER BY title, id""").fetchall()
+                                      FROM oauth_accounts WHERE platform <> 'balaschat_waba' ORDER BY title, id""").fetchall()
         providers = [(key, provider, bool(social_oauth.settings(key)))
                      for key in social_oauth.PROVIDERS for provider in [social_oauth.provider_for(key)]]
         return render_template("studio.html", page=page, channels=channels,
@@ -615,13 +616,16 @@ def enqueue(db, item, body, base_photo, form):
         if cid.startswith("oauth:"):
             account_id = cid.removeprefix("oauth:")
             if not account_id.isdecimal() or len(account_id)>18: raise ValueError("Akun tidak valid.")
-            account=db.execute("""SELECT id,title,platform FROM oauth_accounts WHERE id=%s AND publish_ready
+            account=db.execute("""SELECT id,title,platform,external_id FROM oauth_accounts WHERE id=%s AND publish_ready
                 AND (expires_at IS NULL OR expires_at > now() OR refreshable) FOR SHARE""",(int(account_id),)).fetchone()
             if not account: raise ValueError("Akun OAuth belum siap; sambungkan ulang.")
             multi_publish.validate(account["platform"],caption,bytes(photo or b""))
             if account["platform"]=="pinterest" and multi_publish.media_kind(bytes(photo or b""))=="video" and not cover:
                 raise ValueError("Pilih foto cover untuk video Pinterest.")
             options={}
+            remote = integrations.tebar_target(integrations.config("TEBAR", g.workspace_id), account)
+            if remote:
+                options = {"tebar_target": remote, "tebar_key": secrets.token_hex(24)}
             if account["platform"]=="youtube":
                 privacy=form.get("youtube_privacy","private")
                 kids=form.get("youtube_kids","")
@@ -693,13 +697,18 @@ def create():
                 upload=request.files.get("csv")
                 if not upload: raise ValueError("Pilih berkas CSV.")
                 records=csv.DictReader(io.StringIO(upload.read(500001).decode("utf-8-sig")),strict=True)
-                if upload.tell()>500000 or records.fieldnames != ["caption","due","asset"]:
-                    raise ValueError("Gunakan CSV UTF-8 hingga 500 KB dengan header caption,due,asset.")
+                if upload.tell()>500000 or records.fieldnames not in (["caption","due","asset"], ["caption","due","asset","targets"]):
+                    raise ValueError("Gunakan CSV UTF-8 hingga 500 KB dengan header caption,due,asset dan kolom targets opsional.")
                 count=0
                 for count,row in enumerate(records,1):
                     if count>100 or None in row or None in row.values(): raise ValueError("CSV harus berisi maksimal 100 materi dengan tiga kolom.")
                     entry=dict(form,captions={},media={},due=row["due"].strip())
                     try:
+                        destinations = row.get("targets", "").split()
+                        if destinations:
+                            if not set(destinations).issubset(targets):
+                                raise ValueError("Akun targets harus dipilih di editor.")
+                            entry["targets"] = list(dict.fromkeys(destinations))
                         identity=row["asset"].strip()
                         if identity and (not identity.isdecimal() or len(identity)>18): raise ValueError("ID media tidak valid.")
                         stage=save_material(db,row["caption"].strip(),int(identity) if identity else None,entry,None,"publish",approval)
@@ -712,7 +721,7 @@ def create():
                 stage=save_material(db,request.form.get("body","").strip(),asset,form,draft,action,approval)
         flash({"Dipakai":"Kiriman masuk antrean.","Diajukan":"Materi masuk antrean persetujuan.","Draf":"Draf tersimpan."}[stage])
         return redirect("/kalender" if stage=="Dipakai" else "/studio/draf")
-    except (ValueError,csv.Error) as err:
+    except (ValueError,RuntimeError,csv.Error) as err:
         flash(str(err))
         return redirect("/buat"+(f"?draft={draft}" if draft else ""))
 
@@ -769,6 +778,7 @@ def copy_material(item):
 
 
 def validate_public_workspace(wid):
+    if wid > 9223372036854775807: abort(404)
     with raw_connection() as db:
         if not db.execute("SELECT 1 FROM public.workspaces WHERE id=%s",(wid,)).fetchone(): abort(404)
 
@@ -813,8 +823,23 @@ def deliver():
     data={"chat_id":item["channel"]}
     link=None
     note=None
+    remote_id=None
     try:
-        if item["oauth_id"] is not None:
+        if item["publish_options"].get("tebar_target"):
+            settings = integrations.config("TEBAR", worker_workspace.get())
+            with connect() as db:
+                account = db.execute("SELECT platform,external_id FROM oauth_accounts WHERE id=%s AND active AND publish_ready",
+                                     (item["oauth_id"],)).fetchone()
+            target = item["publish_options"]["tebar_target"]
+            if not account or integrations.tebar_target(settings, account) != target:
+                raise ValueError("Pemetaan Tebar berubah; buat jadwal baru setelah memeriksa akun.")
+            media_url = public_media_url(item["id"]) if item["photo"] else None
+            if media_url and urlsplit(media_url).scheme != "https":
+                raise ValueError("Atur SOCIAL_ORIGIN ke URL HTTPS publik untuk media Tebar.")
+            remote_id = integrations.create_tebar(settings, target, item["publish_options"]["tebar_key"],
+                                                  item["body"], media_url)
+            state = "Diproses platform"
+        elif item["oauth_id"] is not None:
             with connect() as db:
                 account=db.execute("""SELECT *,public.pgp_sym_decrypt(credential,%s) AS secret FROM oauth_accounts
                     WHERE id=%s AND publish_ready FOR UPDATE""",(app.secret_key,item["oauth_id"])).fetchone()
@@ -865,9 +890,39 @@ def deliver():
     except (KeyError,TypeError,AttributeError):
         state,note="Periksa channel","Respons API tidak dikenali; cek platform sebelum ulang."
     with connect() as db:
+        if remote_id:
+            db.execute("UPDATE posts SET publish_options=publish_options || %s::jsonb WHERE id=%s",
+                       (json.dumps({"tebar_post": remote_id}), item["id"]))
         db.execute("UPDATE posts SET state=%s,note=%s,link=%s WHERE id=%s",(state,note,link,item["id"]))
         db.execute("INSERT INTO job_events(post_id,state,note) VALUES(%s,%s,%s)",(item["id"],state,note))
     return True
+
+
+def poll_tebar():
+    with connect() as db:
+        item = db.execute("""SELECT id,publish_options FROM posts
+            WHERE state='Diproses platform' AND publish_options ? 'tebar_post'
+            AND claimed_at < now()-interval '45 seconds'
+            ORDER BY claimed_at,id LIMIT 1 FOR UPDATE SKIP LOCKED""").fetchone()
+        if not item:
+            return
+        db.execute("UPDATE posts SET claimed_at=now() WHERE id=%s", (item["id"],))
+    try:
+        settings = integrations.config("TEBAR", worker_workspace.get())
+        options = item["publish_options"]
+        state, link, note = integrations.tebar_status(settings, options["tebar_post"], options["tebar_target"])
+    except ValueError as err:
+        state, link, note = "Periksa channel", None, str(err)
+        if "HTTP 429" in note:
+            return
+    except (RuntimeError, KeyError, TypeError, AttributeError):
+        return
+    if state != "Diproses platform":
+        with connect() as db:
+            changed = db.execute("""UPDATE posts SET state=%s,link=%s,note=%s
+                WHERE id=%s AND state='Diproses platform'""", (state,link,note,item["id"]))
+            if changed.rowcount:
+                db.execute("INSERT INTO job_events(post_id,state,note) VALUES(%s,%s,%s)",(item["id"],state,note))
 
 
 from workspace_views import register
@@ -892,6 +947,7 @@ if __name__=="__main__":
                         WHERE state='Mengirim' AND (claimed_at IS NULL OR claimed_at < now()-interval '30 minutes')""")
                     db.execute("""INSERT INTO worker_status VALUES (1,now())
                                ON CONFLICT(id) DO UPDATE SET seen=excluded.seen""")
+            poll_tebar()
             worked = deliver() or worked
             worked = workflows.process(connect,app.secret_key) or worked
         if ping:
