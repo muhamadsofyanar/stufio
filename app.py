@@ -300,6 +300,8 @@ def create():
                 account=db.execute("SELECT platform FROM channels WHERE id=%s",(int(cid),)).fetchone()
                 if not account:
                     raise ValueError("Akun tidak tersedia.")
+                if account["platform"] not in {"Telegram", "Discord"}:
+                    raise ValueError("Konektor akun ini belum mendukung publikasi.")
                 limit=2000 if account["platform"]=="Discord" else (1024 if photo else 4096)
                 if len(body)>limit:
                     raise ValueError(f"Teks untuk {account['platform']} maksimal {limit} karakter.")
@@ -341,7 +343,7 @@ def deliver():
             payload={"content":item["body"],"allowed_mentions":{"parse":[]}}
             sent=discord_request(discord_url(item["secret"]),payload=payload,photo=bytes(item["photo"] or b""))
             link=f"https://discord.com/channels/{item['guild']}/{sent['channel_id']}/{sent['id']}"
-        else:
+        elif item["platform"] == "Telegram":
             if item["photo"]:
                 data["caption"]=item["body"]
                 sent=telegram(item["secret"],"sendPhoto",data,{"photo":("foto",bytes(item["photo"]))})
@@ -351,6 +353,8 @@ def deliver():
             username=sent["chat"].get("username")
             path=username or "c/"+str(item["channel"]).removeprefix("-100")
             link=f"https://t.me/{path}/{sent['message_id']}"
+        else:
+            raise ValueError("Konektor akun ini belum mendukung publikasi.")
         state="Terbit"
     except ValueError as err:
         state,note="Gagal",str(err)
