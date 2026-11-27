@@ -18,7 +18,7 @@ def discord_request(url, *, payload=None, photo=None):
             response = requests.get(url, **options)
         else:
             if photo:
-                ext = "png" if photo.startswith(b"\x89PNG") else "jpg"
+                ext = "mp4" if photo[4:8] == b"ftyp" else ("png" if photo.startswith(b"\x89PNG") else "jpg")
                 options.update(data={"payload_json": json.dumps(payload)},
                                files={"files[0]": (f"foto.{ext}", photo)})
             else:

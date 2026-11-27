@@ -19,3 +19,5 @@ fieldset{border:1px solid var(--line);border-radius:10px}.target{display:flex;ga
 .account-card button,.account-row button{font-size:.875rem}
 .account-heading{margin-top:30px}
 .account-row,.account-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;justify-content:space-between}
+
+[hidden]{display:none!important}

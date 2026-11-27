@@ -23,27 +23,39 @@ PROVIDERS = {
     "instagram": Provider("Instagram", "Business atau Creator yang tertaut ke Halaman Facebook",
                           "https://www.facebook.com/v25.0/dialog/oauth",
                           "https://graph.facebook.com/v25.0/oauth/access_token",
-                          "pages_show_list,pages_read_engagement,instagram_basic,business_management"),
+                          "pages_show_list,pages_read_engagement,instagram_basic,business_management,instagram_content_publish"),
     "threads": Provider("Threads", "Profil", "https://threads.com/oauth/authorize",
-                        "https://graph.threads.net/oauth/access_token", "threads_basic"),
+                        "https://graph.threads.net/oauth/access_token", "threads_basic,threads_content_publish"),
     "facebook": Provider("Facebook", "Halaman", "https://www.facebook.com/v25.0/dialog/oauth",
                          "https://graph.facebook.com/v25.0/oauth/access_token",
-                         "pages_show_list,pages_read_engagement,business_management"),
+                         "pages_show_list,pages_read_engagement,business_management,pages_manage_posts"),
     "tiktok": Provider("TikTok", "Profil", "https://www.tiktok.com/v2/auth/authorize/",
-                       "https://open.tiktokapis.com/v2/oauth/token/", "user.info.basic",
+                       "https://open.tiktokapis.com/v2/oauth/token/", "user.info.basic,video.upload",
                        client_field="client_key"),
     "linkedin": Provider("LinkedIn", "Profil", "https://www.linkedin.com/oauth/v2/authorization",
-                         "https://www.linkedin.com/oauth/v2/accessToken", "openid profile"),
+                         "https://www.linkedin.com/oauth/v2/accessToken", "openid profile w_member_social"),
     "youtube": Provider("YouTube", "Channel", "https://accounts.google.com/o/oauth2/v2/auth",
                          "https://oauth2.googleapis.com/token",
-                         "https://www.googleapis.com/auth/youtube.readonly", pkce=True),
+                         "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload", pkce=True),
     "x": Provider("X", "Profil", "https://x.com/i/oauth2/authorize",
-                  "https://api.x.com/2/oauth2/token", "users.read tweet.read",
+                  "https://api.x.com/2/oauth2/token", "users.read tweet.read tweet.write media.write offline.access",
                   basic_auth=True, pkce=True),
     "pinterest": Provider("Pinterest", "Profil", "https://www.pinterest.com/oauth/",
                            "https://api.pinterest.com/v5/oauth/token",
-                           "user_accounts:read", basic_auth=True),
+                           "user_accounts:read,boards:read,pins:read,pins:write", basic_auth=True),
 }
+
+def instagram_direct():
+    return os.getenv("INSTAGRAM_LOGIN_MODE","facebook").strip().lower()=="direct"
+
+
+def provider_for(key):
+    if key=="instagram" and instagram_direct():
+        return Provider("Instagram","Akun Professional (Business/Creator)",
+                        "https://www.instagram.com/oauth/authorize",
+                        "https://api.instagram.com/oauth/access_token",
+                        "instagram_business_basic,instagram_business_content_publish")
+    return PROVIDERS[key]
 
 
 def settings(key):
@@ -61,7 +73,7 @@ def settings(key):
 
 
 def authorization_url(key, config, state, verifier):
-    provider = PROVIDERS[key]
+    provider = provider_for(key)
     client, _, callback = config
     params = {provider.client_field: client, "redirect_uri": callback, "scope": provider.scope,
               "response_type": "code", "state": state}
@@ -70,7 +82,7 @@ def authorization_url(key, config, state, verifier):
             hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
         params["code_challenge_method"] = "S256"
     if key == "youtube":
-        params["prompt"] = "select_account"
+        params.update(prompt="consent select_account", access_type="offline")
     return f"{provider.authorize}?{urlencode(params)}"
 
 
@@ -88,7 +100,7 @@ def api(method, url, **kwargs):
 
 
 def exchange(key, config, code, verifier):
-    provider = PROVIDERS[key]
+    provider = provider_for(key)
     client, secret, callback = config
     data = {"grant_type": "authorization_code", "code": code, "redirect_uri": callback}
     options = {}
@@ -100,12 +112,20 @@ def exchange(key, config, code, verifier):
         data.update({provider.client_field: client, "client_secret": secret})
     if provider.pkce:
         data["code_verifier"] = verifier
-    if key in {"instagram", "facebook"}:
+    if key in {"instagram", "facebook"} and not (key=="instagram" and instagram_direct()):
         data = api("GET", provider.token, params=data)
     else:
         data = api("POST", provider.token, data=data, **options)
     if not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise ValueError("Platform tidak memberikan token akses.")
+    if key=="instagram" and instagram_direct():
+        short=data
+        data=api("GET","https://graph.instagram.com/access_token",
+                 params={"grant_type":"ig_exchange_token","client_secret":secret,"access_token":short["access_token"]})
+        if short.get("permissions"): data["permissions"]=short["permissions"]
+        data["instagram_mode"]="direct"
+        if not data.get("access_token"): raise ValueError("Instagram tidak memberikan token jangka panjang.")
+        return data
     if key in {"facebook", "instagram", "threads"}:
         threads = key == "threads"
         long_token_url = "https://graph.threads.net/access_token" if threads else provider.token
@@ -127,8 +147,11 @@ def accounts(key, token):
     def get(url, **params):
         return api("GET", url, headers=headers, params=params)
 
+    if key=="instagram" and token.get("instagram_mode")=="direct":
+        row=get("https://graph.instagram.com/v25.0/me",fields="user_id,username")
+        return [(row.get("user_id") or row.get("id"),row.get("username"),token)]
     if key in {"facebook", "instagram"}:
-        fields = "id,name,access_token"
+        fields = "id,name,access_token,tasks"
         if key == "instagram":
             fields += ",instagram_business_account{id,username}"
         params = {"fields": fields, "limit": 100}
@@ -140,10 +163,10 @@ def accounts(key, token):
                 if not item.get("access_token"):
                     continue
                 if key == "facebook":
-                    rows.append((item.get("id"), item.get("name"), {"access_token": item["access_token"]}))
+                    rows.append((item.get("id"), item.get("name"), {"access_token": item["access_token"], "can_publish": "CREATE_CONTENT" in item.get("tasks", []) or "MANAGE" in item.get("tasks", [])}))
                 elif instagram := item.get("instagram_business_account"):
                     rows.append((instagram.get("id"), instagram.get("username"),
-                                 {"access_token": item["access_token"]}))
+                                 {"access_token": item["access_token"], "can_publish": "CREATE_CONTENT" in item.get("tasks", []) or "MANAGE" in item.get("tasks", [])}))
             paging = page.get("paging", {})
             cursor = paging.get("cursors", {}).get("after")
             if not paging.get("next"):
@@ -181,5 +204,49 @@ def accounts(key, token):
     if key == "x":
         row = get("https://api.x.com/2/users/me").get("data", {})
         return [(row.get("id"), row.get("username"), token)]
-    row = get("https://api.pinterest.com/v5/user_account")
-    return [(row.get("id") or row.get("username"), row.get("username"), token)]
+    # Pins must target a specific board; expose each board as a separate destination.
+    rows, seen = [], set()
+    params = {"page_size": 100}
+    while True:
+        page = get("https://api.pinterest.com/v5/boards", **params)
+        rows.extend((row.get("id"), row.get("name"), token) for row in page.get("items", []))
+        cursor = page.get("bookmark")
+        if not cursor: return rows
+        if cursor in seen: raise ValueError("Daftar board Pinterest tidak lengkap.")
+        seen.add(cursor)
+        params["bookmark"] = cursor
+
+def granted_scopes(key, token):
+    if key=="instagram" and token.get("instagram_mode")=="direct":
+        value=token.get("permissions") or token.get("scope")
+        if isinstance(value,str): return set(value.replace(","," ").split())
+        if isinstance(value,list): return set(value)
+        return set(provider_for(key).scope.split(","))
+    if key in {"facebook", "instagram"}:
+        result = api("GET", "https://graph.facebook.com/v25.0/me/permissions",
+                     headers={"Authorization": "Bearer " + token["access_token"]})
+        return {row["permission"] for row in result.get("data", []) if row.get("status") == "granted"}
+    value = token.get("scope")
+    if isinstance(value, str):
+        return set(value.replace(",", " ").split())
+    # Some OAuth providers omit scope if it matches the request.
+    return set(provider_for(key).scope.replace(",", " ").split())
+
+
+def refresh(key, credentials):
+    config = settings(key)
+    if not config or not credentials.get("refresh_token"):
+        raise ValueError("Token kedaluwarsa; sambungkan ulang akun.")
+    client, secret, _ = config
+    provider = provider_for(key)
+    data = {"grant_type": "refresh_token", "refresh_token": credentials["refresh_token"]}
+    kwargs = {}
+    if provider.basic_auth:
+        kwargs["auth"] = (client, secret)
+        if key == "x": data["client_id"] = client
+    else:
+        data.update({provider.client_field: client, "client_secret": secret})
+    result = api("POST", provider.token, data=data, **kwargs)
+    if not result.get("access_token"):
+        raise ValueError("Pembaruan token gagal; sambungkan ulang akun.")
+    return {**credentials, **{k: result[k] for k in ("access_token","refresh_token","expires_in","scope") if k in result}}

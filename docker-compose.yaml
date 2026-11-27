@@ -14,9 +14,10 @@ x-app: &app
 services:
   web:
     <<: *app
-    environment:
+    environment: &social_runtime
       <<: *runtime
       SOCIAL_ORIGIN: ${SOCIAL_ORIGIN:-}
+      INSTAGRAM_LOGIN_MODE: ${INSTAGRAM_LOGIN_MODE:-facebook}
       INSTAGRAM_CLIENT_ID: ${INSTAGRAM_CLIENT_ID:-}
       INSTAGRAM_CLIENT_SECRET: ${INSTAGRAM_CLIENT_SECRET:-}
       FACEBOOK_CLIENT_ID: ${FACEBOOK_CLIENT_ID:-}
@@ -36,6 +37,7 @@ services:
     expose: ["8000"]
   worker:
     <<: *app
+    environment: *social_runtime
     command: ["python","app.py"]
   db:
     image: postgres:16-bookworm

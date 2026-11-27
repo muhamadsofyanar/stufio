@@ -1,9 +1,9 @@
 {% if page=='media' %}
-<h1>Pustaka media</h1><p class="muted">Simpan foto untuk dipakai kembali di editor.</p>
+<h1>Pustaka media</h1><p class="muted">Simpan foto atau video untuk dipakai kembali di editor.</p>
 <form class="card" action="/media" method="post" enctype="multipart/form-data">{{csrf()}}
-<label>Foto JPEG atau PNG · hingga 8 MB<input required type="file" name="photo" accept="image/jpeg,image/png"></label>
-<button>Unggah foto</button></form>
-<div class="gallery">{% for image in media %}<article><img loading="lazy" alt="{{image.name}}" src="/media/{{image.id}}"><strong>{{image.name}}</strong><p><a href="/buat?asset={{image.id}}">Gunakan foto</a></p></article>{% else %}<p>Belum ada foto tersimpan.</p>{% endfor %}</div>
+<label>JPEG/PNG hingga 8 MB atau MP4 hingga 32 MB<input required type="file" name="photo" accept="image/jpeg,image/png,video/mp4"></label>
+<button>Unggah media</button></form>
+<div class="gallery">{% for image in media %}<article>{% if image.video %}<video controls preload="metadata" style="max-width:100%" src="/media/{{image.id}}"></video>{% else %}<img loading="lazy" alt="{{image.name}}" src="/media/{{image.id}}">{% endif %}<strong>{{image.name}}</strong><p><a href="/buat?asset={{image.id}}">Gunakan media</a></p></article>{% else %}<p>Belum ada foto tersimpan.</p>{% endfor %}</div>
 {% else %}
 <h1>{{'Papan ide' if page=='ide' else 'Draf'}}</h1>
 {% if page=='ide' %}<form action="/ide" method="post" class="card">{{csrf()}}<input type="hidden" name="stage" value="Ide"><label>Ide baru<input name="body" required maxlength="4096" placeholder="Apa yang ingin Anda bagikan?"></label><button>Catat ide</button></form>{% else %}<a class="cta" href="/buat">Tulis draf</a>{% endif %}

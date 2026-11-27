@@ -1,6 +1,6 @@
 # Studio Taysriul
 
-Dashboard publikasi Telegram dan Discord untuk satu workspace. Foto disimpan di PostgreSQL. Token bot dan URL webhook disimpan terenkripsi. Worker mengirim dari server walaupun browser ditutup. Tidak menggunakan Node.js, Redis atau sharp.
+Dashboard publikasi multi-platform untuk satu workspace. Foto dan video disimpan di PostgreSQL. Token bot dan URL webhook disimpan terenkripsi. Worker mengirim dari server walaupun browser ditutup. Tidak menggunakan Node.js, Redis atau sharp.
 
 ## Pasang lewat GitHub dan Coolify
 
@@ -49,4 +49,4 @@ Upload seluruh isi paket ke repo yang sudah dipakai, termasuk publishing.py, tem
 | X | `x` | `X_CLIENT_ID`, `X_CLIENT_SECRET` | X API dengan akses profil pengguna |
 | Pinterest | `pinterest` | `PINTEREST_CLIENT_ID`, `PINTEREST_CLIENT_SECRET` | Pinterest API dengan izin `user_accounts:read` |
 
-Stufio tidak membatasi jumlah akun tersimpan. Akses API, persetujuan aplikasi, kuota, dan biaya tetap mengikuti platform. Delapan konektor OAuth pada rilis ini menangani otorisasi dan penyimpanan identitas. Jadwal dan publikasi tersedia untuk Telegram dan Discord. Untuk akun OAuth dengan masa aktif token yang diketahui, Stufio menampilkan status sambungkan ulang setelah token kedaluwarsa. Jika akses dicabut di platform, sambungkan ulang dari kartu platform.
+Stufio tidak membatasi jumlah akun tersimpan. Akses API, persetujuan aplikasi, kuota, dan biaya tetap mengikuti platform. Delapan konektor OAuth memiliki adapter publikasi pada rilis ini; fitur dan ketersediaan aktual mengikuti izin API. Lihat UPDATE-MULTIPLATFORM.md untuk matriks dukungan, langkah migrasi dan pengujian. Untuk akun OAuth dengan masa aktif token yang diketahui, Stufio menampilkan status sambungkan ulang setelah token kedaluwarsa. Jika akses dicabut di platform, sambungkan ulang dari kartu platform.

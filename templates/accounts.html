@@ -42,9 +42,9 @@
 {% endfor %}
 {% for c in social_accounts %}
 <article class="account-row">
-  <div><strong>{{ c.title }}</strong><small>{{ provider_labels[c.platform] }} · {{ 'Sambungkan ulang' if c.expired else 'Izin akun tersimpan' }}</small></div>
+  <div><strong>{{ c.title }}</strong><small>{{ provider_labels[c.platform] }} · {{ 'Sambungkan ulang' if c.expired else ('Izin publikasi tersimpan; uji kirim' if c.publish_ready else 'Sambungkan ulang untuk izin publikasi') }}</small></div>
   <div class="account-actions">
-    {% if c.expired %}
+    {% if c.expired or not c.publish_ready %}
     <form method="post" action="{{ url_for('start_oauth', platform=c.platform) }}">
       {{ csrf() }}
       <button class="secondary">Sambungkan ulang</button>

@@ -16,10 +16,11 @@ from psycopg.rows import dict_row
 
 import social_oauth
 from publishing import discord_request, discord_url
+import multi_publish
 
 app = Flask(__name__)
 app.secret_key = os.environ["APP_KEY"]
-app.config.update(MAX_CONTENT_LENGTH=9*1024**2, SESSION_COOKIE_SECURE=True,
+app.config.update(MAX_CONTENT_LENGTH=34*1024**2, SESSION_COOKIE_SECURE=True,
                   SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 WIB = ZoneInfo("Asia/Jakarta")
 
@@ -49,6 +50,14 @@ with connect() as db:
       id bigserial PRIMARY KEY, platform text NOT NULL, external_id text NOT NULL,
       title text NOT NULL, credential bytea NOT NULL, expires_at timestamptz,
       UNIQUE (platform, external_id));
+    ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS publish_ready boolean NOT NULL DEFAULT false;
+    ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS refreshable boolean NOT NULL DEFAULT false;
+    ALTER TABLE posts ALTER COLUMN channel DROP NOT NULL;
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS oauth_id bigint;
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS target_title text;
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS cover bytea;
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS publish_options jsonb NOT NULL DEFAULT '{}';
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
     CREATE TABLE IF NOT EXISTS oauth_attempts (
       state text PRIMARY KEY, platform text NOT NULL, session_hash text NOT NULL,
       verifier text NOT NULL, created timestamptz NOT NULL DEFAULT now());
@@ -73,7 +82,7 @@ def protect():
     if request.method == "POST" and not hmac.compare_digest(
             str(request.form.get("csrf","")).encode(), session["csrf"].encode()):
         abort(403)
-    if request.endpoint in {"static","open_link"}:
+    if request.endpoint in {"static","open_link","publish_media"}:
         return
     if request.path != "/login" and not session.get("admin"):
         return redirect("/login")
@@ -103,15 +112,19 @@ def dashboard(page="ringkasan"):
     if page == "akun":
         with connect() as db:
             channels = db.execute("SELECT id,title,platform FROM channels ORDER BY title").fetchall()
-            accounts = db.execute("""SELECT id,platform,title,expires_at <= now() AS expired
+            accounts = db.execute("""SELECT id,platform,title,publish_ready,(expires_at <= now() AND NOT refreshable) AS expired
                                       FROM oauth_accounts ORDER BY title, id""").fetchall()
         providers = [(key, provider, bool(social_oauth.settings(key)))
-                     for key, provider in social_oauth.PROVIDERS.items()]
+                     for key in social_oauth.PROVIDERS for provider in [social_oauth.provider_for(key)]]
         return render_template("studio.html", page=page, channels=channels,
                                social_accounts=accounts, providers=providers,
                                provider_labels={key: provider.label for key, provider, _ in providers})
     with connect() as db:
         channels = db.execute("SELECT id,title,platform FROM channels ORDER BY title").fetchall()
+        channels += [{**row, "id": "oauth:"+str(row["id"]), "platform": multi_publish.LABELS[row["platform"]],
+                      "key": row["platform"]} for row in db.execute("""SELECT id,title,platform FROM oauth_accounts
+                      WHERE publish_ready AND (expires_at IS NULL OR expires_at > now() OR refreshable) ORDER BY title""").fetchall()
+                     if row["platform"] in multi_publish.CAPABILITIES]
         draft = None
         media = []
         if page == "buat":
@@ -125,8 +138,8 @@ def dashboard(page="ringkasan"):
                             count(*) FILTER (WHERE state='Terbit') AS sent,
                             count(*) FILTER (WHERE state IN ('Gagal','Periksa channel')) AS issues
                             FROM posts""").fetchone()
-        posts = db.execute("""SELECT p.id,body,due,state,note,link,title FROM posts p
-                            JOIN channels c ON p.channel=c.id
+        posts = db.execute("""SELECT p.id,body,due,state,note,link,COALESCE(c.title,p.target_title,'Akun dilepas') AS title FROM posts p
+                            LEFT JOIN channels c ON p.channel=c.id
                             ORDER BY (state='Terjadwal') DESC,
                             CASE WHEN state='Terjadwal' THEN due END ASC,due DESC LIMIT 200""").fetchall()
     for post in posts:
@@ -208,8 +221,9 @@ def finish_oauth(platform):
         if request.args.get("error") or not code:
             raise ValueError("Izin akun dibatalkan atau ditolak.")
         token = social_oauth.exchange(platform, config, code, attempt["verifier"])
-        token = {key: token[key] for key in ("access_token", "refresh_token", "expires_in", "scope")
+        token = {key: token[key] for key in ("access_token", "refresh_token", "expires_in", "scope", "permissions", "instagram_mode")
                  if key in token}
+        granted = social_oauth.granted_scopes(platform, token)
         accounts = {str(external_id): (title, credentials)
                     for external_id, title, credentials in social_oauth.accounts(platform, token)
                     if external_id and isinstance(title, str) and title.strip()}
@@ -220,13 +234,13 @@ def finish_oauth(platform):
                 lifetime = credentials.get("expires_in")
                 expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(lifetime))
                               if str(lifetime).isdigit() and 0 < int(lifetime) < 10**9 else None)
-                db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential,expires_at)
-                              VALUES (%s,%s,%s,pgp_sym_encrypt(%s,%s),%s)
+                db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential,expires_at,publish_ready,refreshable)
+                              VALUES (%s,%s,%s,pgp_sym_encrypt(%s,%s),%s,%s,%s)
                               ON CONFLICT (platform,external_id) DO UPDATE SET
                               title=excluded.title, credential=excluded.credential,
-                              expires_at=excluded.expires_at""",
+                              expires_at=excluded.expires_at,publish_ready=excluded.publish_ready,refreshable=excluded.refreshable""",
                            (platform, external_id, title, json.dumps(credentials),
-                            app.secret_key, expires_at))
+                            app.secret_key, expires_at, (multi_publish.SCOPES.get(platform) in granted or (platform=="instagram" and "instagram_business_content_publish" in granted)) and credentials.get("can_publish",True), bool(credentials.get("refresh_token"))))
         flash(f"{len(accounts)} akun {social_oauth.PROVIDERS[platform].label} tersimpan.")
     except ValueError as err:
         flash(str(err))
@@ -295,7 +309,7 @@ def library_page(page):
 
 
 def media_list(db):
-    return db.execute("SELECT id,name FROM assets ORDER BY id DESC").fetchall()
+    return db.execute("SELECT id,name,substring(photo from 5 for 4)=decode('66747970','hex') AS video FROM assets ORDER BY id DESC").fetchall()
 
 
 @app.get("/media/<int:aid>")
@@ -305,7 +319,7 @@ def asset(aid):
     if not row:
         abort(404)
     photo = bytes(row["photo"])
-    return Response(photo, mimetype="image/png" if photo.startswith(b"\x89PNG") else "image/jpeg",
+    return Response(photo, mimetype=multi_publish.mime(photo),
                     headers={"Cache-Control":"private, max-age=86400","X-Content-Type-Options":"nosniff"})
 
 
@@ -314,8 +328,9 @@ def photo_upload():
     if not upload or not upload.filename:
         return None
     data = upload.read()
-    if len(data) > 8*1024**2 or not data.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
-        raise ValueError("Gunakan JPEG atau PNG hingga 8 MB.")
+    kind = multi_publish.media_kind(data)
+    if kind == "text" or len(data) > (32 if kind == "video" else 8)*1024**2:
+        raise ValueError("Gunakan JPEG/PNG hingga 8 MB atau MP4 hingga 32 MB.")
     return data
 
 
@@ -405,16 +420,37 @@ def create():
             if not targets:
                 raise ValueError("Pilih minimal satu akun.")
             due=read_due(request.form["due"])
+            cover=None
+            if request.form.get("cover",type=int):
+                row=db.execute("SELECT photo FROM assets WHERE id=%s",(request.form.get("cover",type=int),)).fetchone()
+                if not row or multi_publish.media_kind(bytes(row["photo"]))!="image":
+                    raise ValueError("Cover harus berupa foto dari pustaka.")
+                cover=row["photo"]
             for cid in targets:
-                account=db.execute("SELECT platform FROM channels WHERE id=%s",(int(cid),)).fetchone()
-                if not account:
-                    raise ValueError("Akun tidak tersedia.")
-                if account["platform"] not in {"Telegram", "Discord"}:
-                    raise ValueError("Konektor akun ini belum mendukung publikasi.")
-                limit=2000 if account["platform"]=="Discord" else (1024 if photo else 4096)
-                if len(body)>limit:
-                    raise ValueError(f"Teks untuk {account['platform']} maksimal {limit} karakter.")
-                db.execute("INSERT INTO posts(channel,body,photo,due) VALUES(%s,%s,%s,%s)",(int(cid),body,photo,due))
+                if cid.startswith("oauth:"):
+                    account_id = cid.removeprefix("oauth:")
+                    if not account_id.isdecimal(): raise ValueError("Akun tidak valid.")
+                    account=db.execute("""SELECT id,title,platform FROM oauth_accounts WHERE id=%s AND publish_ready
+                        AND (expires_at IS NULL OR expires_at > now() OR refreshable)""",(int(account_id),)).fetchone()
+                    if not account: raise ValueError("Akun OAuth belum siap; sambungkan ulang.")
+                    multi_publish.validate(account["platform"],body,bytes(photo or b""))
+                    if account["platform"]=="pinterest" and multi_publish.media_kind(bytes(photo or b""))=="video" and not cover:
+                        raise ValueError("Pilih foto cover untuk video Pinterest.")
+                    options={}
+                    if account["platform"]=="youtube":
+                        privacy=request.form.get("youtube_privacy","private")
+                        kids=request.form.get("youtube_kids","")
+                        if privacy not in {"public","unlisted","private"} or kids not in {"yes","no"}:
+                            raise ValueError("Pilih visibilitas dan audiens anak YouTube.")
+                        options={"privacy":privacy,"kids":kids=="yes"}
+                    db.execute("INSERT INTO posts(oauth_id,target_title,body,photo,due,cover,publish_options) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                               (account["id"],account["title"],body,photo,due,cover if account["platform"]=="pinterest" else None,json.dumps(options)))
+                else:
+                    if not re.fullmatch(r"-?[0-9]{1,19}",cid): raise ValueError("Akun tidak valid.")
+                    account=db.execute("SELECT platform FROM channels WHERE id=%s",(int(cid),)).fetchone()
+                    if not account: raise ValueError("Akun tidak tersedia.")
+                    multi_publish.validate(account["platform"],body,bytes(photo or b""))
+                    db.execute("INSERT INTO posts(channel,body,photo,due) VALUES(%s,%s,%s,%s)",(int(cid),body,photo,due))
             if draft:
                 db.execute("UPDATE editorial SET stage='Dipakai' WHERE id=%s",(draft,))
         flash("Kiriman masuk antrean.")
@@ -435,27 +471,72 @@ def change(pid):
         flash("Jadwal diperbarui." if changed.rowcount else "Postingan sudah diproses.")
     return redirect("/kalender")
 
+def public_media_url(pid, kind="media"):
+    origin=os.getenv("SOCIAL_ORIGIN","").rstrip("/")
+    expires=int(time.time())+3600
+    signature=hmac.new(app.secret_key.encode(),f"publish:{kind}:{pid}:{expires}".encode(),hashlib.sha256).hexdigest()
+    return f"{origin}/publish-media/{kind}/{pid}/{expires}/{signature}"
+
+
+@app.route("/publish-media/<any(media,cover):kind>/<int:pid>/<int:expires>/<signature>", methods=["GET","HEAD"])
+def publish_media(kind,pid,expires,signature):
+    expected=hmac.new(app.secret_key.encode(),f"publish:{kind}:{pid}:{expires}".encode(),hashlib.sha256).hexdigest()
+    if expires < time.time() or not hmac.compare_digest(expected,signature): abort(404)
+    with connect() as db:
+        row=db.execute("SELECT photo,cover FROM posts WHERE id=%s AND oauth_id IS NOT NULL AND state IN ('Mengirim','Terbit','Diproses platform')",(pid,)).fetchone()
+    field="cover" if kind=="cover" else "photo"
+    if not row or not row[field]: abort(404)
+    from io import BytesIO
+    from flask import send_file
+    media=bytes(row[field])
+    response=send_file(BytesIO(media),mimetype=multi_publish.mime(media),conditional=True,max_age=0)
+    response.headers["Cache-Control"]="private, no-store"
+    response.headers["X-Content-Type-Options"]="nosniff"
+    return response
+
 
 def deliver():
     with connect() as db:
         item=db.execute("""SELECT p.*,c.platform,c.guild,pgp_sym_decrypt(c.token,%s) AS secret FROM posts p
-          JOIN channels c ON c.id=p.channel WHERE state='Terjadwal' AND due<=now()
+          LEFT JOIN channels c ON c.id=p.channel WHERE state='Terjadwal' AND due<=now()
           ORDER BY due,p.id LIMIT 1 FOR UPDATE OF p SKIP LOCKED""",(app.secret_key,)).fetchone()
         if not item:
             return False
-        db.execute("UPDATE posts SET state='Mengirim' WHERE id=%s",(item["id"],))
+        db.execute("UPDATE posts SET state='Mengirim',claimed_at=now() WHERE id=%s",(item["id"],))
     data={"chat_id":item["channel"]}
     link=None
     note=None
     try:
-        if item["platform"]=="Discord":
+        if item["oauth_id"] is not None:
+            with connect() as db:
+                account=db.execute("""SELECT *,pgp_sym_decrypt(credential,%s) AS secret FROM oauth_accounts
+                    WHERE id=%s AND publish_ready FOR UPDATE""",(app.secret_key,item["oauth_id"])).fetchone()
+                if not account: raise ValueError("Akun OAuth dilepas atau perlu disambungkan ulang.")
+                credentials=json.loads(account["secret"])
+                if account["expires_at"] and account["expires_at"] <= datetime.now(timezone.utc)+timedelta(minutes=2):
+                    old_refresh=credentials.get("refresh_token")
+                    credentials=social_oauth.refresh(account["platform"],credentials)
+                    lifetime=int(credentials.get("expires_in",3600))
+                    # Some providers rotate a refresh token shared by several selected boards/channels.
+                    db.execute("""UPDATE oauth_accounts SET credential=pgp_sym_encrypt(%s,%s),
+                        expires_at=now()+%s*interval '1 second',refreshable=%s
+                        WHERE platform=%s AND (id=%s OR (pgp_sym_decrypt(credential,%s)::jsonb->>'refresh_token')=%s)""",
+                        (json.dumps(credentials),app.secret_key,lifetime,bool(credentials.get("refresh_token")),
+                         account["platform"],account["id"],app.secret_key,old_refresh))
+            media=bytes(item["photo"] or b"")
+            url=public_media_url(item["id"]) if media and account["platform"] in {"instagram","threads"} else None
+            state,link,note=multi_publish.publish(account["platform"],account["external_id"],credentials,item["body"],media,url,public_media_url(item["id"],"cover") if item["cover"] else None,item["publish_options"])
+        elif item["platform"]=="Discord":
             payload={"content":item["body"],"allowed_mentions":{"parse":[]}}
             sent=discord_request(discord_url(item["secret"]),payload=payload,photo=bytes(item["photo"] or b""))
             link=f"https://discord.com/channels/{item['guild']}/{sent['channel_id']}/{sent['id']}"
         elif item["platform"] == "Telegram":
             if item["photo"]:
                 data["caption"]=item["body"]
-                sent=telegram(item["secret"],"sendPhoto",data,{"photo":("foto",bytes(item["photo"]))})
+                media=bytes(item["photo"])
+                video=multi_publish.media_kind(media)=="video"
+                sent=telegram(item["secret"],"sendVideo" if video else "sendPhoto",data,
+                              {"video" if video else "photo":("video.mp4" if video else "foto",media)})
             else:
                 data["text"]=item["body"]
                 sent=telegram(item["secret"],"sendMessage",data)
@@ -469,11 +550,13 @@ def deliver():
                 link = f"https://t.me/{path}/{sent['message_id']}"
         else:
             raise ValueError("Konektor akun ini belum mendukung publikasi.")
-        state="Terbit"
+        if item["oauth_id"] is None: state="Terbit"
     except ValueError as err:
         state,note="Gagal",str(err)
     except RuntimeError as err:
         state,note="Periksa channel",str(err)
+    except (KeyError,TypeError,AttributeError):
+        state,note="Periksa channel","Respons API tidak dikenali; cek platform sebelum ulang."
     with connect() as db:
         db.execute("UPDATE posts SET state=%s,note=%s,link=%s WHERE id=%s",(state,note,link,item["id"]))
     return True
@@ -484,6 +567,8 @@ if __name__=="__main__":
     while True:
         if time.monotonic()-last_ping >= 15:
             with connect() as db:
+                db.execute("""UPDATE posts SET state='Periksa channel',note='Worker terhenti; periksa platform sebelum mengirim ulang.'
+                    WHERE state='Mengirim' AND (claimed_at IS NULL OR claimed_at < now()-interval '30 minutes')""")
                 db.execute("""INSERT INTO worker_status VALUES (1,now())
                            ON CONFLICT(id) DO UPDATE SET seen=excluded.seen""")
             last_ping=time.monotonic()
