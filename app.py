@@ -1,3 +1,4 @@
+import service_desk
 import calendar
 import csv
 import io
@@ -60,6 +61,7 @@ def connect():
 def prepare_schema(db, wid):
     if db.execute("SELECT 1 FROM public.workspace_migrations WHERE workspace=%s AND version=1",(wid,)).fetchone():
         set_workspace(db,wid)
+        service_desk.migrate(db,wid)
         return
     schema = sql.Identifier(schema_for(wid))
     db.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
@@ -119,6 +121,7 @@ def prepare_schema(db, wid):
     CREATE TABLE IF NOT EXISTS submissions(nonce text PRIMARY KEY, created timestamptz DEFAULT now());""")
 
     db.execute("INSERT INTO public.workspace_migrations(workspace,version) VALUES(%s,1)",(wid,))
+    service_desk.migrate(db,wid)
 
 
 with raw_connection() as db:
@@ -861,6 +864,7 @@ def deliver():
 
 from workspace_views import register
 register(app, connect, prepare_schema, record_event)
+service_desk.register(app,connect)
 
 
 if __name__=="__main__":

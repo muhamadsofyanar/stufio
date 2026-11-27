@@ -6,9 +6,10 @@ import io
 import json
 import os
 
-from flask import Response, abort, flash, g, redirect, render_template, request
+from flask import session, Response, abort, flash, g, redirect, render_template, request
 from werkzeug.security import generate_password_hash
 
+import service_desk
 import meta_activity
 from social_oauth import api
 
@@ -58,6 +59,10 @@ def register(app, connect, prepare_schema, record_event):
                             ON CONFLICT(workspace,member) DO UPDATE SET role=excluded.role""", (g.workspace_id,user["id"],role))
                 else:
                     abort(400)
+                if action in ("member","remove") and user and (action=="remove" or role=="viewer"):
+                    released=db.execute("UPDATE desk_threads SET owner_id=NULL WHERE owner_id=%s RETURNING id",(user["id"],)).fetchall()
+                    for thread in released:
+                        service_desk.log(db,thread["id"],"Penugasan dilepas karena akses anggota berubah")
                 if action != "create":
                     record_event(db, action, login if action in {"member", "remove"} else g.workspace_id)
                 flash("Pengaturan tersimpan.")
@@ -71,6 +76,8 @@ def register(app, connect, prepare_schema, record_event):
     @app.route("/aktivitas/<any(inbox,analitik):page>")
     def activity(page):
         state = request.args.get("status","all")
+        followup=request.args.get("followup","")
+        if followup not in ("","Terbuka","Selesai"): abort(400)
         if state not in ("all","pending","done"):
             abort(400)
         aid=request.args.get("account",type=int)
@@ -93,7 +100,7 @@ def register(app, connect, prepare_schema, record_event):
                 AND strpos(lower(a.label||' '||a.body||' '||o.title),lower(%s))>0
                 AND (%s='all' OR (%s='messages')=(o.platform='facebook')) AND (%s='all' OR (%s='done' AND a.reply_state='Terbalas')
                 OR (%s='pending' AND a.reply_state IS DISTINCT FROM 'Terbalas'))
-                ORDER BY a.observed DESC,a.external_id LIMIT 300""", (page,aid,aid,query,stream,stream,state,state,state)).fetchall()
+                AND (%s='' OR a.followup=%s) ORDER BY a.observed DESC,a.external_id LIMIT 300""", (page,aid,aid,query,stream,stream,state,state,state,followup,followup)).fetchall()
             accounts = db.execute("SELECT id,title,platform FROM oauth_accounts WHERE active AND (platform IN ('youtube','facebook','instagram') OR (platform='threads' AND %s='inbox')) ORDER BY title", (page,)).fetchall()
         if page == "analitik" and request.args.get("format") == "csv":
             output = io.StringIO()
@@ -125,10 +132,20 @@ def register(app, connect, prepare_schema, record_event):
                     abort(404)
                 elif platform == "facebook":
                     if page != "inbox": abort(404)
-                    data = api("GET", f"https://graph.facebook.com/v25.0/{channel}/conversations", headers=headers,
-                               params={"platform":"messenger","fields":"id,participants,messages.limit(1){id,from,message,created_time}","limit":50})
+                    params={"platform":"messenger","fields":"id,participants,messages.limit(50){"+service_desk.MESSAGE_FIELDS+"}","limit":50}
+                    cursor=db.execute("SELECT after_cursor FROM desk_pages WHERE account=%s",(aid,)).fetchone()
+                    more=request.form.get("more")=="1"
+                    if more:
+                        if not cursor or not cursor["after_cursor"]: abort(409)
+                        params["after"]=cursor["after_cursor"]
+                    data=api("GET",f"https://graph.facebook.com/v25.0/{channel}/conversations",headers=headers,params=params)
+                    paging=data.get("paging",{})
+                    after=paging.get("cursors",{}).get("after") if paging.get("next") else None
+                    if more or not cursor or not cursor["after_cursor"]:
+                        db.execute("INSERT INTO desk_pages VALUES(%s,%s) ON CONFLICT(account) DO UPDATE SET after_cursor=excluded.after_cursor",(aid,after))
                     items = []
                     for thread in data["data"]:
+                        service_desk.ingest(db,aid,channel,thread)
                         for msg in thread.get("messages", {}).get("data", []):
                             items.append((msg["id"], msg.get("from", {}).get("name", "Messenger"), msg.get("message") or "Lampiran", None, msg.get("from",{}).get("id") if msg.get("from",{}).get("id")!=channel else None))
                 elif page == "inbox":
@@ -160,6 +177,7 @@ def register(app, connect, prepare_schema, record_event):
             with connect() as db:
                 db.execute("UPDATE oauth_accounts SET sync_result=%s WHERE id=%s AND active", (f"{page}: gagal", aid))
             flash(str(err) if isinstance(err, ValueError) else "Respons platform belum dapat dibaca. Periksa koneksi akun.")
+        if request.form.get("desk")=="1": return redirect("/layanan")
         return redirect("/aktivitas/" + page)
 
     @app.post("/aktivitas/inbox/reply/<int:aid>")
@@ -175,6 +193,10 @@ def register(app, connect, prepare_schema, record_event):
                 (app.secret_key,aid,item)).fetchone()
             if not row:
                 abort(409)
+            if row["platform"]=="facebook" and g.role=="editor":
+                owner=db.execute("""SELECT t.owner_id FROM desk_threads t JOIN desk_contacts c ON t.contact=c.id
+                    JOIN desk_messages m ON m.thread=t.id WHERE c.account=%s AND m.remote_id=%s""",(aid,item)).fetchone()
+                if owner and owner["owner_id"] not in (None,session.get("user")): abort(403)
             flag = meta_activity.COMMENT_FLAGS.get(row["platform"])
             if not flag or os.getenv(flag)!="1":
                 abort(403)

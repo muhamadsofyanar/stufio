@@ -30,3 +30,8 @@ dialog{width:min(860px,94vw);max-height:85vh;background:#f7f6fc;border:1px solid
 
 .nav-group {display:block; margin:.9rem .65rem .25rem; font-size:.78rem; letter-spacing:.03em}
 .account-row small {overflow-wrap:anywhere}
+
+.desk-layout {display:grid;grid-template-columns:minmax(14rem,1fr) minmax(0,2fr);gap:1rem;align-items:start}
+.desk-layout article {overflow-wrap:anywhere}
+.desk-layout form {margin-block:1rem}
+@media(max-width:760px){.desk-layout{grid-template-columns:1fr}}

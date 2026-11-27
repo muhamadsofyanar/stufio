@@ -1,0 +1,41 @@
+waiting for server to start.... done
+server started
+test_exchange_not_fb_long_token (test_ig_unified.UnifiedTests.test_exchange_not_fb_long_token) ... ok
+test_facebook_unchanged (test_ig_unified.UnifiedTests.test_facebook_unchanged) ... ok
+test_login_preserves_state_and_config (test_ig_unified.UnifiedTests.test_login_preserves_state_and_config) ... ok
+test_missing_config (test_ig_unified.UnifiedTests.test_missing_config) ... ok
+test_verified_target_and_permission (test_ig_unified.UnifiedTests.test_verified_target_and_permission) ... ok
+test_facebook_feed_photo_video (test_publish.PublishTests.test_facebook_feed_photo_video) ... ok
+test_instagram_direct (test_publish.PublishTests.test_instagram_direct) ... ok
+test_linkedin_text (test_publish.PublishTests.test_linkedin_text) ... ok
+test_linkedin_video (test_publish.PublishTests.test_linkedin_video) ... ok
+test_media_and_validation (test_publish.PublishTests.test_media_and_validation) ... ok
+test_missing_id_not_success (test_publish.PublishTests.test_missing_id_not_success) ... ok
+test_oauth_permissions (test_publish.PublishTests.test_oauth_permissions) ... ok
+test_pinterest_image_and_video (test_publish.PublishTests.test_pinterest_image_and_video) ... ok
+test_threads_text (test_publish.PublishTests.test_threads_text) ... ok
+test_tiktok_draft (test_publish.PublishTests.test_tiktok_draft) ... ok
+test_x_text_image_video (test_publish.PublishTests.test_x_text_image_video) ... ok
+test_youtube (test_publish.PublishTests.test_youtube) ... ok
+test_atomic_multi_account_and_caption (test_workspaces.WorkspaceTests.test_atomic_multi_account_and_caption) ... ok
+test_bulk_rollback_replay_and_target_retry (test_workspaces.WorkspaceTests.test_bulk_rollback_replay_and_target_retry) ... ok
+test_daily_history_and_account_search (test_workspaces.WorkspaceTests.test_daily_history_and_account_search) ... ok
+test_desk_routing_transfer_reopen_and_isolation (test_workspaces.WorkspaceTests.test_desk_routing_transfer_reopen_and_isolation) ... ok
+test_disconnect_retains_history_and_cancels_only_selected_target (test_workspaces.WorkspaceTests.test_disconnect_retains_history_and_cancels_only_selected_target) ... ok
+test_feed_workspace_and_filters (test_workspaces.WorkspaceTests.test_feed_workspace_and_filters) ... ok
+test_messenger_reply (test_workspaces.WorkspaceTests.test_messenger_reply) ... ok
+test_meta_comments_and_metrics (test_workspaces.WorkspaceTests.test_meta_comments_and_metrics) ... ok
+test_oauth_and_reporting (test_workspaces.WorkspaceTests.test_oauth_and_reporting) ... ok
+test_pages_and_isolation (test_workspaces.WorkspaceTests.test_pages_and_isolation) ... ok
+test_public_media_and_shortlinks (test_workspaces.WorkspaceTests.test_public_media_and_shortlinks) ... ok
+test_queue_and_worker (test_workspaces.WorkspaceTests.test_queue_and_worker) ... ok
+test_review_variants_revision_and_week (test_workspaces.WorkspaceTests.test_review_variants_revision_and_week) ... ok
+test_role_and_membership (test_workspaces.WorkspaceTests.test_role_and_membership) ... ok
+test_service_paging_attachments_and_permissions (test_workspaces.WorkspaceTests.test_service_paging_attachments_and_permissions) ... ok
+test_sync_result_preserves_last_success_after_failure (test_workspaces.WorkspaceTests.test_sync_result_preserves_last_success_after_failure) ... ok
+
+----------------------------------------------------------------------
+Ran 33 tests in 4.280s
+
+OK
+<title>Taysriul

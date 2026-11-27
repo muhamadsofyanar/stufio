@@ -296,3 +296,74 @@ class WorkspaceTests(unittest.TestCase):
         with self.studio.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) AS n FROM posts WHERE state='Terbit'").fetchone()["n"],4)
             self.assertEqual(db.execute("SELECT count(*) AS n FROM job_events WHERE post_id=%s AND state='Mengirim'",(failed,)).fetchone()["n"],2)
+
+    def test_desk_routing_transfer_reopen_and_isolation(self):
+        for name in ("agent-a","agent-b"):
+            self.post("/pengaturan",action="member",login=name,password="password-local",role="editor")
+        self.post("/layanan/pengaturan",action="policy",routing="1",opens="09:00",closes="17:00")
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            db.execute("INSERT INTO oauth_accounts(platform,external_id,title,credential) VALUES('facebook','page','Page A',public.pgp_sym_encrypt(%s,%s))",('{"access_token":"test"}',self.studio.app.secret_key))
+        def thread(key):
+            return {"id":"thread"+key,"messages":{"data":[{"id":"m"+key,"from":{"id":key,"name":"Customer "+key},"message":"Halo","created_time":"2025-01-01T08:00:00+0000"}]}}
+        payload={"data":[thread("1"),thread("2")]}
+        def sync():
+            with patch("workspace_views.api",return_value=payload):
+                self.assertEqual(self.post("/aktivitas/inbox/1/sync",desk="1").status_code,302)
+        sync()
+        self.assertIn(b"Customer 1",self.client.get("/layanan?thread=1").data)
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            members=[r["owner_id"] for r in db.execute("SELECT owner_id FROM desk_threads ORDER BY id")]
+            self.assertNotEqual(members[0],members[1])
+        self.post("/layanan/1",action="assign",member=members[1])
+        self.post("/layanan/1",action="profile",notes="Pelanggan lama",tags="tag-unik")
+        self.post("/layanan/1",action="resolve")
+        sync()
+        self.assertIn(b"Customer 1",self.client.get("/layanan?status=done").data)
+        payload["data"][0]["messages"]["data"].append({"id":"m-new","message":"Pesan baru","from":{"id":"1","name":"Customer 1"},"created_time":"2099-01-01T08:10:00+0000"})
+        sync()
+        html=self.client.get("/layanan?status=open&q=tag-unik").data
+        self.assertIn(b"Dibuka kembali oleh pesan pelanggan",html)
+        self.assertIn(b"Pesan baru",html)
+        self.assertIn(b"Pelanggan lama",html)
+        self.assertIn(b"agent-b",html)
+        with patch.dict(os.environ,{"FACEBOOK_MESSENGER_ENABLED":"1"}), patch("service_desk.api",return_value={"message_id":"out1"}) as provider:
+            nonce=secrets.token_urlsafe()
+            self.assertEqual(self.post("/layanan/1",action="send",body="Balasan",nonce=nonce).status_code,302)
+            self.assertEqual(self.post("/layanan/1",action="send",body="Balasan",nonce=nonce).status_code,409)
+            self.assertEqual(provider.call_count,1)
+        self.post("/workspace/switch",workspace=1)
+        self.assertEqual(self.client.get("/layanan?thread=1").status_code,404)
+        self.assertNotIn(b"Customer 1",self.client.get("/layanan").data)
+
+    def test_service_paging_attachments_and_permissions(self):
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential) VALUES('facebook','page','Page',
+                public.pgp_sym_encrypt(%s,%s))""",('{"access_token":"test"}',self.studio.app.secret_key))
+        thread={"id":"T","participants":{"data":[{"id":"page"},{"id":"C","name":"Customer"}]},
+                "messages":{"data":[{"id":"m","from":{"id":"C"},"message":"Foto","created_time":"2024-01-10T00:00:00Z",
+                "attachments":{"data":[{"name":"Foto pelanggan","image_data":{"url":"https://example.org/photo.jpg"}}]}}],
+                "paging":{"next":"next","cursors":{"after":"older"}}}}
+        with patch("workspace_views.api",return_value={"data":[thread],"paging":{"next":"next","cursors":{"after":"threads"}}}):
+            self.post("/aktivitas/inbox/1/sync",desk="1")
+        with patch("workspace_views.api",return_value={"data":[]}) as pages:
+            self.post("/aktivitas/inbox/1/sync",desk="1",more="1")
+            self.assertEqual(pages.call_args.kwargs["params"]["after"],"threads")
+        self.post("/layanan/1",action="resolve")
+        with patch("service_desk.api",return_value={"data":[{"id":"old","from":{"id":"C"},"message":"Pesan terdahulu","created_time":"2024-01-01T00:00:00Z"}]}) as older:
+            self.post("/layanan/1/riwayat")
+            self.assertEqual(older.call_args.kwargs["params"]["after"],"older")
+        html=self.client.get("/layanan?status=done").data
+        self.assertIn(b"Foto pelanggan",html)
+        self.assertIn(b"Pesan terdahulu",html)
+        self.post("/layanan/pengaturan",action="saved",body="Terima kasih")
+        self.assertIn(b"Terima kasih",self.client.get("/layanan").data)
+        self.post("/pengaturan",action="member",login="viewer-desk",password="test-password-12",role="viewer")
+        self.post("/logout")
+        self.client.get("/login")
+        self.post("/login",login="viewer-desk",password="test-password-12")
+        self.assertEqual(self.client.get("/layanan").status_code,200)
+        self.assertEqual(self.post("/layanan/1",action="open").status_code,403)
+        self.assertEqual(self.post("/layanan/pengaturan",action="saved",body="Denied").status_code,403)
