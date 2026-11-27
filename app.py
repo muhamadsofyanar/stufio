@@ -50,6 +50,8 @@ def protect():
     if request.method == "POST" and not hmac.compare_digest(
             str(request.form.get("csrf","")).encode(), session["csrf"].encode()):
         abort(403)
+    if request.endpoint == "static":
+        return
     if request.path != "/login" and not session.get("admin"):
         return redirect("/login")
 
@@ -77,6 +79,10 @@ def logout():
 def dashboard(page="ringkasan"):
     with connect() as db:
         channels = db.execute("SELECT id,title FROM channels ORDER BY title").fetchall()
+        totals = db.execute("""SELECT count(*) FILTER (WHERE state='Terjadwal') AS queued,
+                            count(*) FILTER (WHERE state='Terbit') AS sent,
+                            count(*) FILTER (WHERE state IN ('Gagal','Periksa channel')) AS issues
+                            FROM posts""").fetchone()
         posts = db.execute("""SELECT p.id,body,due,state,note,link,title FROM posts p
                             JOIN channels c ON p.channel=c.id
                             ORDER BY (state='Terjadwal') DESC,
@@ -85,7 +91,7 @@ def dashboard(page="ringkasan"):
         post["local"] = post["due"].astimezone(WIB)
     if page=="kalender":
         posts.sort(key=lambda p:p["local"])
-    return render_template("studio.html", page=page, channels=channels, posts=posts)
+    return render_template("studio.html", page=page, channels=channels, posts=posts, totals=totals)
 
 
 @app.post("/akun")
