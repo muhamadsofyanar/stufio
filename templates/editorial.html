@@ -1,0 +1,17 @@
+{% if page=='media' %}
+<h1>Pustaka media</h1><p class="muted">Simpan foto untuk dipakai kembali di editor.</p>
+<form class="card" action="/media" method="post" enctype="multipart/form-data">{{csrf()}}
+<label>Foto JPEG atau PNG · hingga 8 MB<input required type="file" name="photo" accept="image/jpeg,image/png"></label>
+<button>Unggah foto</button></form>
+<div class="gallery">{% for image in media %}<article><img loading="lazy" alt="{{image.name}}" src="/media/{{image.id}}"><strong>{{image.name}}</strong><p><a href="/buat?asset={{image.id}}">Gunakan foto</a></p></article>{% else %}<p>Belum ada foto tersimpan.</p>{% endfor %}</div>
+{% else %}
+<h1>{{'Papan ide' if page=='ide' else 'Draf'}}</h1>
+{% if page=='ide' %}<form action="/ide" method="post" class="card">{{csrf()}}<input type="hidden" name="stage" value="Ide"><label>Ide baru<input name="body" required maxlength="4096" placeholder="Apa yang ingin Anda bagikan?"></label><button>Catat ide</button></form>{% else %}<a class="cta" href="/buat">Tulis draf</a>{% endif %}
+<div class="{{'board' if page=='ide' else ''}}">
+{% for stage in (stages[:3] if page=='ide' else ['Draf']) %}<section><h2>{{stage}} <small>{{items|selectattr('stage','equalto',stage)|list|length}}</small></h2>
+{% for item in items if item.stage==stage %}<article><p class="body">{{item.body or 'Draf foto'}}</p>
+{% if page=='draf' %}<a href="/buat?draft={{item.id}}">Buka editor</a>{% else %}
+<details><summary>Edit atau pindahkan</summary><form action="/ide" method="post">{{csrf()}}<input type="hidden" name="id" value="{{item.id}}"><label>Isi ide<textarea name="body" required maxlength="4096">{{item.body}}</textarea></label>
+<label>Tahap<select name="stage">{% for option in stages %}<option {{'selected' if option==stage}}>{{option}}</option>{% endfor %}</select></label><button>Simpan</button></form></details>{% endif %}</article>
+{% else %}<p class="muted">Belum ada {{stage|lower}}.</p>{% endfor %}</section>{% endfor %}</div>
+{% endif %}

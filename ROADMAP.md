@@ -1,6 +1,6 @@
 # Roadmap Studio Taysriul
 
-Dasar versi awal adalah satu workspace admin, Telegram, teks dan foto, serta agenda WIB. Berikut urutan sepuluh pengembangan setelah alur pertama teruji di VPS.
+Rilis saat ini mencakup Telegram, Discord melalui webhook, agenda WIB, heartbeat worker, pustaka foto, draf, papan ide, editor dengan beberapa tujuan, serta tautan pendek dan total akses. Tahapan berikut tetap menjadi acuan untuk kemampuan lanjutan, seperti caption khusus per tujuan dan analitik harian. Berikut urutan sepuluh pengembangan setelah alur pertama teruji di VPS.
 
 | Langkah | Fitur | Kriteria selesai |
 |---|---|---|
@@ -14,3 +14,5 @@ Dasar versi awal adalah satu workspace admin, Telegram, teks dan foto, serta age
 | 8 | Tautan dan analitik | Admin membuat tautan pendek dan melihat klik per hari serta metrik yang tersedia per platform. |
 | 9 | Komentar dan inbox | Pesan masuk ditautkan ke postingan asal, dapat difilter dan dibalas pada kanal yang mendukung. |
 | 10 | Otomasi dan agen AI | Aturan kata kunci menghasilkan draf berbasis sumber workspace. Admin dapat menyetujui dan menelusuri riwayat balasan. |
+
+Acuan layar dan alur interaksi: [ACUAN-UI-UX.md](ACUAN-UI-UX.md).

@@ -1,0 +1,13 @@
+<h1>{{'Edit draf' if draft else 'Buat post'}}</h1>
+{% if not channels %}<p class="msg">Anda bisa menyimpan draf sekarang. <a href="/akun">Hubungkan akun</a> untuk menerbitkannya.</p>{% endif %}
+<div class="tabs"><button type="button" class="secondary" data-view="editor" aria-pressed="true">Editor</button><button type="button" class="secondary" data-view="preview" aria-pressed="false">Pratinjau</button></div>
+<div class="split" data-pane="editor"><form id="compose" method="post" action="/buat" enctype="multipart/form-data" class="card">{{csrf()}}<input type="hidden" name="nonce" value="{{nonce}}">
+{% if draft %}<input type="hidden" name="draft" value="{{draft.id}}">{% endif %}
+<fieldset><legend>Akun tujuan</legend>{% for c in channels %}<label class="target"><input type="checkbox" name="channel" value="{{c.id}}" data-platform="{{c.platform}}" data-title="{{c.title}}" {{'checked' if channels|length==1}}>{{c.title}} · {{c.platform}}</label>{% endfor %}</fieldset>
+<label>Pesan atau caption<textarea name="body" id="body" maxlength="4096">{{draft.body if draft else ''}}</textarea></label>
+<label>Dari pustaka<select id="asset" name="asset"><option value="">Tanpa foto pustaka</option>{% for image in media %}<option value="{{image.id}}" {{'selected' if image.id==(draft.asset if draft else request.args.get('asset',type=int))}}>{{image.name}}</option>{% endfor %}</select></label>
+<label>Atau unggah foto baru<input type="file" id="photo" name="photo" accept="image/jpeg,image/png"></label>
+<label>Waktu terbit (WIB)<input name="due" id="due" type="datetime-local"></label><small>Kosongkan untuk mengirim sekarang.</small><p id="counter" aria-live="polite"></p>
+<button id="send" name="action" value="publish">Kirim sekarang</button> <button class="secondary" name="action" value="draft">Simpan draf</button>
+</form><section class="card preview"><small>Pratinjau kiriman</small><div class="bubble"><h2 id="title"></h2><img id="pic" hidden alt="Pratinjau foto"><p id="copy" class="body"></p></div></section></div>
+<script src="/static/composer.js" defer></script>
