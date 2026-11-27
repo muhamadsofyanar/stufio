@@ -1,0 +1,60 @@
+<h1>Akun sosial</h1>
+<p class="muted">{{ (channels|length) + (social_accounts|length) }} akun tersimpan · Tanpa batas jumlah akun di Stufio</p>
+
+<h2>Hubungkan akun baru</h2>
+<div class="account-grid">
+  <details class="account-card">
+    <summary><strong>Telegram</strong><small>Channel dan grup</small></summary>
+    <form action="{{ url_for('account') }}" method="post">
+      {{ csrf() }}
+      <p>Jadikan bot admin channel atau grup dan berikan izin mengirim.</p>
+      <label>Token bot<input type="password" name="token" required autocomplete="off"></label>
+      <label>Username atau ID<input name="target" placeholder="@nama_channel atau -100…" required></label>
+      <button>Uji dan simpan</button>
+    </form>
+  </details>
+  <details class="account-card">
+    <summary><strong>Discord</strong><small>Channel server</small></summary>
+    <form action="{{ url_for('add_discord') }}" method="post">
+      {{ csrf() }}
+      <label>Nama akun<input name="title" maxlength="100" placeholder="Pengumuman komunitas"></label>
+      <label>URL webhook<input name="webhook" type="password" required autocomplete="off"></label>
+      <button>Uji dan simpan</button>
+    </form>
+  </details>
+  {% for key, provider, ready in providers %}
+  <div class="account-card">
+    <strong>{{ provider.label }}</strong>
+    <small>{{ provider.target }}</small>
+    {% if ready %}
+    <form method="post" action="{{ url_for('start_oauth', platform=key) }}">
+      {{ csrf() }}
+      <button class="secondary">Hubungkan {{ provider.label }}</button>
+    </form>
+    {% else %}<small class="account-status">Konfigurasi aplikasi diperlukan</small>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<h2 class="account-heading">Koneksi tersimpan</h2>
+{% for c in channels %}
+<article class="account-row"><strong>{{ c.title }}</strong><small>{{ c.platform }} · Siap untuk publikasi</small></article>
+{% endfor %}
+{% for c in social_accounts %}
+<article class="account-row">
+  <div><strong>{{ c.title }}</strong><small>{{ provider_labels[c.platform] }} · {{ 'Sambungkan ulang' if c.expired else 'Izin akun tersimpan' }}</small></div>
+  <div class="account-actions">
+    {% if c.expired %}
+    <form method="post" action="{{ url_for('start_oauth', platform=c.platform) }}">
+      {{ csrf() }}
+      <button class="secondary">Sambungkan ulang</button>
+    </form>
+    {% endif %}
+    <form method="post" action="{{ url_for('disconnect_oauth', account_id=c.id) }}">
+      {{ csrf() }}
+      <button class="secondary">Lepas dari Stufio</button>
+    </form>
+  </div>
+</article>
+{% endfor %}
+{% if not channels and not social_accounts %}<p class="muted">Belum ada akun tersimpan.</p>{% endif %}

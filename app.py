@@ -1,18 +1,21 @@
+import hashlib
+import hmac
+import json
 import os
 import re
-from urllib.parse import urlsplit
-import hmac
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from publishing import discord_request, discord_url
-from flask import Response
 import psycopg
 import requests
-from flask import Flask, abort, flash, redirect, render_template, request, session
+from flask import Flask, Response, abort, flash, redirect, render_template, request, session
 from psycopg.rows import dict_row
+
+import social_oauth
+from publishing import discord_request, discord_url
 
 app = Flask(__name__)
 app.secret_key = os.environ["APP_KEY"]
@@ -42,6 +45,13 @@ with connect() as db:
     CREATE TABLE IF NOT EXISTS shortlinks(slug text PRIMARY KEY, destination text NOT NULL,
       title text NOT NULL, clicks bigint NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS worker_status(id integer PRIMARY KEY, seen timestamptz NOT NULL);
+    CREATE TABLE IF NOT EXISTS oauth_accounts (
+      id bigserial PRIMARY KEY, platform text NOT NULL, external_id text NOT NULL,
+      title text NOT NULL, credential bytea NOT NULL, expires_at timestamptz,
+      UNIQUE (platform, external_id));
+    CREATE TABLE IF NOT EXISTS oauth_attempts (
+      state text PRIMARY KEY, platform text NOT NULL, session_hash text NOT NULL,
+      verifier text NOT NULL, created timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS submissions(nonce text PRIMARY KEY, created timestamptz DEFAULT now());""")
 
 
@@ -90,6 +100,16 @@ def logout():
 @app.route("/")
 @app.route("/<any(akun,buat,kalender):page>")
 def dashboard(page="ringkasan"):
+    if page == "akun":
+        with connect() as db:
+            channels = db.execute("SELECT id,title,platform FROM channels ORDER BY title").fetchall()
+            accounts = db.execute("""SELECT id,platform,title,expires_at <= now() AS expired
+                                      FROM oauth_accounts ORDER BY title, id""").fetchall()
+        providers = [(key, provider, bool(social_oauth.settings(key)))
+                     for key, provider in social_oauth.PROVIDERS.items()]
+        return render_template("studio.html", page=page, channels=channels,
+                               social_accounts=accounts, providers=providers,
+                               provider_labels={key: provider.label for key, provider, _ in providers})
     with connect() as db:
         channels = db.execute("SELECT id,title,platform FROM channels ORDER BY title").fetchall()
         draft = None
@@ -120,14 +140,21 @@ def dashboard(page="ringkasan"):
 def account():
     token=request.form["token"].strip()
     target=request.form["target"].strip()
-    if not token or not target:
-        abort(400)
+    if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token) or not target:
+        flash("Periksa token bot dan username atau ID Telegram.")
+        return redirect("/akun")
     try:
         bot=telegram(token,"getMe",{})
         chat=telegram(token,"getChat",{"chat_id":target})
         member=telegram(token,"getChatMember",{"chat_id":chat["id"],"user_id":bot["id"]})
-        if chat["type"]!="channel" or not member.get("can_post_messages"):
-            raise ValueError("Jadikan bot admin channel dan izinkan mengirim pesan.")
+        if chat["type"] == "channel":
+            if not member.get("can_post_messages"):
+                raise ValueError("Jadikan bot admin channel dan izinkan mengirim pesan.")
+        elif chat["type"] in {"group", "supergroup"}:
+            if member["status"] not in {"administrator", "creator"}:
+                raise ValueError("Jadikan bot admin grup Telegram.")
+        else:
+            raise ValueError("Pilih channel atau grup Telegram.")
         with connect() as db:
             db.execute("""INSERT INTO channels(id,title,token) VALUES (%s,%s,pgp_sym_encrypt(%s,%s))
                        ON CONFLICT(id) DO UPDATE SET title=excluded.title, token=excluded.token""",
@@ -135,6 +162,88 @@ def account():
         flash("Channel terhubung.")
     except (ValueError,RuntimeError) as err:
         flash(str(err))
+    return redirect("/akun")
+
+
+def oauth_session_hash():
+    return hashlib.sha256(session["csrf"].encode()).hexdigest()
+
+
+@app.post("/akun/oauth/<platform>")
+def start_oauth(platform):
+    if platform not in social_oauth.PROVIDERS:
+        abort(404)
+    config = social_oauth.settings(platform)
+    if not config:
+        flash("Lengkapi konfigurasi aplikasi platform sebelum menyambungkan akun.")
+        return redirect("/akun")
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(48)
+    with connect() as db:
+        db.execute("DELETE FROM oauth_attempts WHERE created <= now() - interval '10 minutes'")
+        db.execute("""INSERT INTO oauth_attempts(state,platform,session_hash,verifier)
+                      VALUES (%s,%s,%s,%s)""", (state, platform, oauth_session_hash(), verifier))
+    response = redirect(social_oauth.authorization_url(platform, config, state, verifier))
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@app.get("/akun/oauth/<platform>/callback")
+def finish_oauth(platform):
+    if platform not in social_oauth.PROVIDERS:
+        abort(404)
+    state = request.args.get("state", "")
+    attempt = None
+    if re.fullmatch(r"[A-Za-z0-9_-]{43}", state):
+        with connect() as db:
+            attempt = db.execute("""DELETE FROM oauth_attempts
+                WHERE state=%s AND platform=%s AND session_hash=%s
+                  AND created > now() - interval '10 minutes' RETURNING verifier""",
+                (state, platform, oauth_session_hash())).fetchone()
+    config = social_oauth.settings(platform)
+    try:
+        if not config or not attempt:
+            raise ValueError("Sesi koneksi kedaluwarsa atau sudah dipakai. Mulai lagi dari Akun sosial.")
+        code = request.args.get("code")
+        if request.args.get("error") or not code:
+            raise ValueError("Izin akun dibatalkan atau ditolak.")
+        token = social_oauth.exchange(platform, config, code, attempt["verifier"])
+        token = {key: token[key] for key in ("access_token", "refresh_token", "expires_in", "scope")
+                 if key in token}
+        accounts = {str(external_id): (title, credentials)
+                    for external_id, title, credentials in social_oauth.accounts(platform, token)
+                    if external_id and isinstance(title, str) and title.strip()}
+        if not accounts:
+            raise ValueError("Platform tidak mengembalikan akun yang dapat dihubungkan.")
+        with connect() as db:
+            for external_id, (title, credentials) in accounts.items():
+                lifetime = credentials.get("expires_in")
+                expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(lifetime))
+                              if str(lifetime).isdigit() and 0 < int(lifetime) < 10**9 else None)
+                db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential,expires_at)
+                              VALUES (%s,%s,%s,pgp_sym_encrypt(%s,%s),%s)
+                              ON CONFLICT (platform,external_id) DO UPDATE SET
+                              title=excluded.title, credential=excluded.credential,
+                              expires_at=excluded.expires_at""",
+                           (platform, external_id, title, json.dumps(credentials),
+                            app.secret_key, expires_at))
+        flash(f"{len(accounts)} akun {social_oauth.PROVIDERS[platform].label} tersimpan.")
+    except ValueError as err:
+        flash(str(err))
+    except (KeyError, TypeError, AttributeError):
+        flash("Format respons platform tidak dikenali.")
+    response = redirect("/akun")
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/akun/oauth/lepas/<int:account_id>")
+def disconnect_oauth(account_id):
+    with connect() as db:
+        deleted = db.execute("DELETE FROM oauth_accounts WHERE id=%s", (account_id,)).rowcount
+    if deleted:
+        flash("Koneksi akun di Stufio dihapus.")
     return redirect("/akun")
 
 
@@ -350,9 +459,14 @@ def deliver():
             else:
                 data["text"]=item["body"]
                 sent=telegram(item["secret"],"sendMessage",data)
-            username=sent["chat"].get("username")
-            path=username or "c/"+str(item["channel"]).removeprefix("-100")
-            link=f"https://t.me/{path}/{sent['message_id']}"
+            chat = sent["chat"]
+            path = chat.get("username")
+            if not path and chat.get("type") in {"channel", "supergroup"}:
+                channel_id = str(chat["id"])
+                if channel_id.startswith("-100"):
+                    path = "c/" + channel_id.removeprefix("-100")
+            if path:
+                link = f"https://t.me/{path}/{sent['message_id']}"
         else:
             raise ValueError("Konektor akun ini belum mendukung publikasi.")
         state="Terbit"

@@ -7,8 +7,7 @@
 {% elif page=='tautan' %}<h1>Tautan pendek</h1><form class="card" action="/tautan" method="post">{{csrf()}}<label>URL tujuan<input type="url" name="destination" required></label><label>Nama tautan (opsional)<input name="slug" pattern="[A-Za-z0-9_-]{1,64}" placeholder="pendaftaran"></label><label>Judul (opsional)<input name="title"></label><button>Buat tautan</button></form>
 {% for link in links %}<article><small>{{link.clicks}} kunjungan</small><h2>{{link.title or link.slug}}</h2><a href="/r/{{link.slug}}">{{request.host}}/r/{{link.slug}}</a><p class="body">{{link.destination}}</p></article>{% else %}<p>Belum ada tautan.</p>{% endfor %}
 {% elif page in ['ide','media','draf'] %}{% include 'editorial.html' %}
-{% elif page=='akun' %}<h1>Akun sosial</h1>{% for c in channels %}<article><b>{{c.title}}</b> · {{c.platform}} · Terhubung</article>{% endfor %}<form method="post" class="card">{{csrf()}}<h2>Telegram</h2><p>Tambahkan bot dari BotFather sebagai admin channel dengan izin mengirim pesan.</p><label>Token bot<input type="password" name="token" required autocomplete="off"></label><label>Username atau ID channel<input name="target" placeholder="@nama_channel atau -100…" required></label><button>Uji dan simpan</button></form>
-<form action="/discord" method="post" class="card">{{csrf()}}<h2>Discord</h2><p>Buat webhook di pengaturan integrasi channel Discord, lalu salin URL-nya.</p><label>Nama akun<input name="title" maxlength="100" placeholder="Contoh: Pengumuman komunitas"></label><label>URL webhook<input name="webhook" type="password" required autocomplete="off"></label><button>Uji dan simpan</button></form>
+{% elif page=='akun' %}{% include 'accounts.html' %}
 {% elif page=='buat' %}{% include 'composer.html' %}
 {% else %}<h1>{{'Kalender' if page=='kalender' else 'Ringkasan'}}</h1><p class="muted">{{'Agenda dan riwayat · WIB' if page=='kalender' else 'Antrean publikasi dan aktivitas terbaru'}}</p>
 {% if page=='ringkasan' %}

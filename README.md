@@ -29,3 +29,24 @@ Upload seluruh isi paket ke repo yang sudah dipakai, termasuk publishing.py, tem
 4. Di editor pilih satu atau beberapa tujuan. Caption dan foto yang sama akan dikirim ke akun terpilih, dengan pemeriksaan batas panjang masing-masing. Pilih jam WIB atau kirim sekarang. Setiap tujuan mendapat satu baris di kalender. Simpan draf menyimpan isi dan foto; pilih kembali tujuan serta waktu saat membuka draf.
 5. Jika respons penerbit tidak pasti, periksa channel sebelum mengirim ulang. Ringkasan menampilkan apakah worker baru-baru ini aktif.
 6. Di Tautan, buat alamat /r/nama dan lihat jumlah akses. Angka ini mencakup permintaan dari bot dan pembaca pratinjau.
+
+## Sambungkan akun dalam lima langkah
+
+1. **Perbarui Stufio.** Deploy paket terbaru melalui Docker Compose. Pertahankan volume PostgreSQL dan APP_KEY lama. Isi `SOCIAL_ORIGIN` dengan domain HTTPS publik service web, misalnya `https://studio.example.com`, tanpa path.
+2. **Siapkan aplikasi pengembang.** Isi pasangan variabel di bawah pada konfigurasi deploy. Di portal platform, daftarkan callback persis sebagai `<SOCIAL_ORIGIN>/akun/oauth/<slug>/callback`. Aktifkan produk, izin dan akun penguji yang diperlukan. Gunakan OAuth 2.0 Web App dengan client secret untuk X.
+3. **Sambungkan Telegram dan Discord.** Di **Akun sosial**, masukkan token bot serta ID/username channel atau grup Telegram dengan bot sebagai admin. Untuk Discord, gunakan webhook masuk dari channel teks. Ulangi untuk tiap tujuan.
+4. **Sambungkan akun OAuth.** Pilih platform, masuk di halaman resmi platform, lalu berikan izin. Untuk Meta, pilih aset yang ingin diotorisasi. Stufio menyimpan seluruh aset relevan yang dikembalikan oleh API. Ulangi dengan akun lain sesuai kebutuhan. Menyambungkan ulang identitas yang sama memperbarui koneksi lama.
+5. **Periksa koneksi.** Pastikan akun muncul di daftar, lalu coba tambah akun ketiga dan sambungkan ulang salah satu akun. Token disimpan terenkripsi. Gunakan **Lepas dari Stufio** untuk menghapus koneksi OAuth lokal. Untuk mencabut izin di platform, gunakan pengaturan akun platform.
+
+| Platform | Slug callback | Variabel lingkungan | Produk atau tipe akun |
+|---|---|---|---|
+| Instagram | `instagram` | `INSTAGRAM_CLIENT_ID`, `INSTAGRAM_CLIENT_SECRET` | Instagram API dengan Facebook Login untuk akun Business/Creator yang tertaut ke Halaman Facebook |
+| Threads | `threads` | `THREADS_CLIENT_ID`, `THREADS_CLIENT_SECRET` | Threads API dengan izin `threads_basic` |
+| Facebook | `facebook` | `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET` | Facebook Login dan akses Pages |
+| TikTok | `tiktok` | `TIKTOK_CLIENT_ID`, `TIKTOK_CLIENT_SECRET` | Login Kit untuk Web. Isi Client Key pada variabel `TIKTOK_CLIENT_ID` |
+| LinkedIn | `linkedin` | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Sign In with LinkedIn using OpenID Connect untuk profil |
+| YouTube | `youtube` | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` | OAuth client tipe Web dan YouTube Data API v3 |
+| X | `x` | `X_CLIENT_ID`, `X_CLIENT_SECRET` | X API dengan akses profil pengguna |
+| Pinterest | `pinterest` | `PINTEREST_CLIENT_ID`, `PINTEREST_CLIENT_SECRET` | Pinterest API dengan izin `user_accounts:read` |
+
+Stufio tidak membatasi jumlah akun tersimpan. Akses API, persetujuan aplikasi, kuota, dan biaya tetap mengikuti platform. Delapan konektor OAuth pada rilis ini menangani otorisasi dan penyimpanan identitas. Jadwal dan publikasi tersedia untuk Telegram dan Discord. Untuk akun OAuth dengan masa aktif token yang diketahui, Stufio menampilkan status sambungkan ulang setelah token kedaluwarsa. Jika akses dicabut di platform, sambungkan ulang dari kartu platform.
