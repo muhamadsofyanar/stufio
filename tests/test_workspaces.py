@@ -193,3 +193,45 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(api.call_args.kwargs["params"]["search_type"],"RECENT")
             self.assertNotIn(b"Public example",self.client.get("/feed?q=test&media=VIDEO").data)
             self.assertEqual(self.client.get("/feed?q=test&account=9999").status_code,404)
+
+    def test_disconnect_retains_history_and_cancels_only_selected_target(self):
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db, self.space)
+            for external in ("page-first", "page-second"):
+                account = db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential,publish_ready)
+                    VALUES('facebook',%s,'Same name',public.pgp_sym_encrypt('{"access_token":"fixture"}',%s),true)
+                    RETURNING id""", (external,self.studio.app.secret_key)).fetchone()["id"]
+                db.execute("INSERT INTO posts(oauth_id,body,due) VALUES(%s,'scheduled',now())",(account,))
+                db.execute("INSERT INTO metric_days VALUES(%s,current_date,'followers',4)", (account,))
+        page = self.client.get("/akun").data
+        self.assertIn(b"page-first",page)
+        self.assertIn(b"page-second",page)
+        self.assertEqual(self.post("/akun/oauth/lepas/1").status_code,302)
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            states=db.execute("SELECT state FROM posts ORDER BY id").fetchall()
+            self.assertEqual([row["state"] for row in states],["Dibatalkan","Terjadwal"])
+            self.assertEqual(db.execute("SELECT count(*) AS n FROM metric_days").fetchone()["n"],2)
+            row=db.execute("SELECT active,public.pgp_sym_decrypt(credential,%s) AS secret FROM oauth_accounts WHERE id=1",(self.studio.app.secret_key,)).fetchone()
+            self.assertFalse(row["active"])
+            self.assertEqual(row["secret"],"{}")
+            self.assertTrue(db.execute("SELECT 1 FROM admin_events WHERE action='Lepas OAuth'").fetchone())
+        self.assertEqual(self.post("/aktivitas/inbox/1/sync").status_code,404)
+        self.assertIn(b"Dilepas",self.client.get("/akun").data)
+
+    def test_sync_result_preserves_last_success_after_failure(self):
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential)
+                VALUES('youtube','channel-123','Channel',public.pgp_sym_encrypt('{"access_token":"fixture"}',%s))""",
+                (self.studio.app.secret_key,))
+        with patch("workspace_views.api", return_value={"items":[]}):
+            self.post("/aktivitas/inbox/1/sync")
+        self.assertIn(b"inbox: berhasil (0 item)",self.client.get("/akun").data)
+        with patch("workspace_views.api", side_effect=ValueError("provider error")):
+            self.post("/aktivitas/inbox/1/sync")
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            row=db.execute("SELECT synced_at,sync_result FROM oauth_accounts WHERE id=1").fetchone()
+            self.assertIsNotNone(row["synced_at"])
+            self.assertEqual(row["sync_result"],"inbox: gagal")

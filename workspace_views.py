@@ -13,7 +13,7 @@ import meta_activity
 from social_oauth import api
 
 
-def register(app, connect, prepare_schema):
+def register(app, connect, prepare_schema, record_event):
     @app.route("/pengaturan", methods=["GET", "POST"])
     def settings():
         with connect() as db:
@@ -27,6 +27,7 @@ def register(app, connect, prepare_schema):
                         if g.role != "owner":
                             abort(403)
                         wid = db.execute("INSERT INTO public.workspaces(name) VALUES(%s) RETURNING id", (name,)).fetchone()["id"]
+                        record_event(db, "Buat workspace", wid)
                         prepare_schema(db, wid)
                     else:
                         db.execute("UPDATE public.workspaces SET name=%s WHERE id=%s", (name, g.workspace_id))
@@ -55,11 +56,14 @@ def register(app, connect, prepare_schema):
                             ON CONFLICT(workspace,member) DO UPDATE SET role=excluded.role""", (g.workspace_id,user["id"],role))
                 else:
                     abort(400)
+                if action != "create":
+                    record_event(db, action, login if action in {"member", "remove"} else g.workspace_id)
                 flash("Pengaturan tersimpan.")
                 return redirect("/pengaturan")
+            events = db.execute("SELECT * FROM admin_events ORDER BY id DESC LIMIT 50").fetchall()
             members = db.execute("""SELECT login,role FROM public.memberships JOIN public.studio_users ON member=id
                 WHERE workspace=%s ORDER BY login""", (g.workspace_id,)).fetchall()
-        return render_template("studio.html", page="pengaturan", members=members)
+        return render_template("studio.html", page="pengaturan", members=members, events=events)
 
     @app.route("/aktivitas/<any(inbox,analitik):page>")
     def activity(page):
@@ -87,7 +91,7 @@ def register(app, connect, prepare_schema):
                 AND (%s='all' OR (%s='messages')=(o.platform='facebook')) AND (%s='all' OR (%s='done' AND a.reply_state='Terbalas')
                 OR (%s='pending' AND a.reply_state IS DISTINCT FROM 'Terbalas'))
                 ORDER BY a.observed DESC,a.external_id LIMIT 300""", (page,aid,aid,query,stream,stream,state,state,state)).fetchall()
-            accounts = db.execute("SELECT id,title,platform FROM oauth_accounts WHERE platform IN ('youtube','facebook','instagram') OR (platform='threads' AND %s='inbox') ORDER BY title", (page,)).fetchall()
+            accounts = db.execute("SELECT id,title,platform FROM oauth_accounts WHERE active AND (platform IN ('youtube','facebook','instagram') OR (platform='threads' AND %s='inbox')) ORDER BY title", (page,)).fetchall()
         if page == "analitik" and request.args.get("format") == "csv":
             output = io.StringIO()
             writer = csv.writer(output)
@@ -103,7 +107,7 @@ def register(app, connect, prepare_schema):
         try:
             with connect() as db:
                 account = db.execute("""SELECT external_id,platform,public.pgp_sym_decrypt(credential,%s) AS credentials
-                    FROM oauth_accounts WHERE id=%s AND platform IN ('facebook','youtube','instagram','threads')""", (app.secret_key,aid)).fetchone()
+                    FROM oauth_accounts WHERE active AND id=%s AND platform IN ('facebook','youtube','instagram','threads') FOR UPDATE""", (app.secret_key,aid)).fetchone()
                 if not account:
                     abort(404)
                 credentials = json.loads(account["credentials"])
@@ -147,8 +151,11 @@ def register(app, connect, prepare_schema):
                     db.execute("""INSERT INTO activity(account,kind,external_id,label,body,video,reply_to) VALUES (%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(account,kind,external_id) DO UPDATE SET label=excluded.label,body=excluded.body,observed=now(),video=excluded.video,reply_to=excluded.reply_to""",
                                (aid,page,external_id,label,body,video,reply_to))
+                db.execute("UPDATE oauth_accounts SET synced_at=now(),sync_result=%s WHERE id=%s", (f"{page}: berhasil ({len(items)} item)", aid))
             flash(f"{len(items)} item disinkronkan.")
         except (ValueError, KeyError, IndexError, TypeError) as err:
+            with connect() as db:
+                db.execute("UPDATE oauth_accounts SET sync_result=%s WHERE id=%s AND active", (f"{page}: gagal", aid))
             flash(str(err) if isinstance(err, ValueError) else "Respons platform belum dapat dibaca. Periksa koneksi akun.")
         return redirect("/aktivitas/" + page)
 
@@ -160,7 +167,7 @@ def register(app, connect, prepare_schema):
             abort(400)
         with connect() as db:
             row = db.execute("""SELECT a.reply_to,o.platform,o.external_id,public.pgp_sym_decrypt(o.credential,%s) AS credential
-                FROM activity a JOIN oauth_accounts o ON o.id=a.account WHERE a.account=%s AND a.kind='inbox'
+                FROM activity a JOIN oauth_accounts o ON o.id=a.account WHERE o.active AND a.account=%s AND a.kind='inbox'
                 AND a.external_id=%s AND a.reply_state IS NULL AND a.reply_to IS NOT NULL FOR UPDATE OF a""",
                 (app.secret_key,aid,item)).fetchone()
             if not row:
@@ -199,9 +206,9 @@ def register(app, connect, prepare_schema):
         enabled=os.getenv("THREADS_FEED_ENABLED")=="1"
         results=[]
         with connect() as db:
-            accounts=db.execute("SELECT id,title FROM oauth_accounts WHERE platform='threads' ORDER BY title,id").fetchall()
+            accounts=db.execute("SELECT id,title FROM oauth_accounts WHERE active AND platform='threads' ORDER BY title,id").fetchall()
             if query and enabled and accounts:
-                row=db.execute("""SELECT public.pgp_sym_decrypt(credential,%s) AS token FROM oauth_accounts WHERE platform='threads' AND id=%s""",
+                row=db.execute("""SELECT public.pgp_sym_decrypt(credential,%s) AS token FROM oauth_accounts WHERE active AND platform='threads' AND id=%s""",
                     (app.secret_key,request.args.get("account",type=int) or accounts[0]["id"])).fetchone()
                 if not row: abort(404)
                 try:

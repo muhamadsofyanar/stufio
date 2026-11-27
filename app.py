@@ -80,6 +80,11 @@ def prepare_schema(db, wid):
       id bigserial PRIMARY KEY, platform text NOT NULL, external_id text NOT NULL,
       title text NOT NULL, credential bytea NOT NULL, expires_at timestamptz,
       UNIQUE (platform, external_id));
+    CREATE TABLE IF NOT EXISTS admin_events(id bigserial PRIMARY KEY, happened timestamptz NOT NULL DEFAULT now(),
+        actor text NOT NULL, action text NOT NULL, target text NOT NULL);
+    ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+    ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS sync_result text;
+    ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS synced_at timestamptz;
     ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS publish_ready boolean NOT NULL DEFAULT false;
     ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS refreshable boolean NOT NULL DEFAULT false;
     ALTER TABLE posts ALTER COLUMN channel DROP NOT NULL;
@@ -118,6 +123,11 @@ with raw_connection() as db:
             db.execute("INSERT INTO public.workspaces(name) VALUES (%s)", (name,))
     for row in db.execute("SELECT id FROM public.workspaces ORDER BY id").fetchall():
         prepare_schema(db, row["id"])
+
+
+def record_event(db, action, target):
+    actor = "owner" if session.get("admin") else f"user:{session['user']}"
+    db.execute("INSERT INTO admin_events(actor,action,target) VALUES(%s,%s,%s)", (actor, action, str(target)))
 
 
 def available(db):
@@ -221,8 +231,8 @@ def dashboard(page="ringkasan"):
         abort(403)
     if page == "akun":
         with connect() as db:
-            channels = db.execute("SELECT id,title,platform FROM channels WHERE active ORDER BY title").fetchall()
-            accounts = db.execute("""SELECT id,platform,title,publish_ready,(expires_at <= now() AND NOT refreshable) AS expired
+            channels = db.execute("SELECT id,title,platform,active FROM channels ORDER BY active DESC,title,id").fetchall()
+            accounts = db.execute("""SELECT id,platform,title,external_id,active,publish_ready,sync_result,synced_at,(expires_at <= now() AND NOT refreshable) AS expired
                                       FROM oauth_accounts ORDER BY title, id""").fetchall()
         providers = [(key, provider, bool(social_oauth.settings(key)))
                      for key in social_oauth.PROVIDERS for provider in [social_oauth.provider_for(key)]]
@@ -295,6 +305,7 @@ def account():
             db.execute("""INSERT INTO channels(id,title,token) VALUES (%s,%s,public.pgp_sym_encrypt(%s,%s))
                        ON CONFLICT(id) DO UPDATE SET active=true,title=excluded.title, token=excluded.token""",
                        (chat["id"],chat["title"],token,app.secret_key))
+            record_event(db, "Hubungkan Telegram", chat["id"])
         flash("Channel terhubung.")
     except (ValueError,RuntimeError) as err:
         flash(str(err))
@@ -360,10 +371,11 @@ def finish_oauth(platform):
                 db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential,expires_at,publish_ready,refreshable)
                               VALUES (%s,%s,%s,public.pgp_sym_encrypt(%s,%s),%s,%s,%s)
                               ON CONFLICT (platform,external_id) DO UPDATE SET
-                              title=excluded.title, credential=excluded.credential,
+                              active=true,title=excluded.title, credential=excluded.credential,
                               expires_at=excluded.expires_at,publish_ready=excluded.publish_ready,refreshable=excluded.refreshable""",
                            (platform, external_id, title, json.dumps(credentials),
                             app.secret_key, expires_at, (multi_publish.SCOPES.get(platform) in granted or (platform=="instagram" and "instagram_business_content_publish" in granted)) and credentials.get("can_publish",True), bool(credentials.get("refresh_token"))))
+                record_event(db, "Hubungkan OAuth", f"{platform}:{external_id}")
         flash(f"{len(accounts)} akun {social_oauth.PROVIDERS[platform].label} tersimpan.")
     except ValueError as err:
         flash(str(err))
@@ -378,9 +390,14 @@ def finish_oauth(platform):
 @app.post("/akun/oauth/lepas/<int:account_id>")
 def disconnect_oauth(account_id):
     with connect() as db:
-        deleted = db.execute("DELETE FROM oauth_accounts WHERE id=%s", (account_id,)).rowcount
-    if deleted:
-        flash("Koneksi akun di Stufio dihapus.")
+        changed = db.execute("""UPDATE oauth_accounts SET active=false,publish_ready=false,refreshable=false,
+            credential=public.pgp_sym_encrypt('{}',%s),expires_at=NULL WHERE id=%s AND active RETURNING id""",
+            (app.secret_key,account_id)).fetchone()
+        if not changed:
+            abort(404)
+        db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE oauth_id=%s AND state='Terjadwal'", (account_id,))
+        record_event(db, "Lepas OAuth", account_id)
+    flash("Akun dilepas. Jadwal yang masih menunggu dibatalkan.")
     return redirect("/akun")
 
 
@@ -392,6 +409,7 @@ def disconnect_channel(channel):
         if not account: abort(404)
         db.execute("UPDATE channels SET active=false,token=public.pgp_sym_encrypt('',%s) WHERE id=%s",(app.secret_key,account["id"]))
         db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE channel=%s AND state='Terjadwal'",(account["id"],))
+        record_event(db, "Lepas channel", channel)
     flash("Akun dilepas. Jadwal yang masih menunggu dibatalkan.")
     return redirect("/akun")
 
@@ -513,6 +531,7 @@ def add_discord():
                  (%s,%s,public.pgp_sym_encrypt(%s,%s),'Discord',%s) ON CONFLICT(id) DO UPDATE SET
                  active=true,title=excluded.title,token=excluded.token,guild=excluded.guild""",
                  (int(hook["id"]),request.form["title"].strip() or hook["name"],url,app.secret_key,hook["guild_id"]))
+            record_event(db, "Hubungkan Discord", hook["id"])
         flash("Webhook Discord terhubung.")
     except (RuntimeError, ValueError) as err:
         flash(str(err))
@@ -571,7 +590,7 @@ def create():
                     account_id = cid.removeprefix("oauth:")
                     if not account_id.isdecimal(): raise ValueError("Akun tidak valid.")
                     account=db.execute("""SELECT id,title,platform FROM oauth_accounts WHERE id=%s AND publish_ready
-                        AND (expires_at IS NULL OR expires_at > now() OR refreshable)""",(int(account_id),)).fetchone()
+                        AND (expires_at IS NULL OR expires_at > now() OR refreshable) FOR SHARE""",(int(account_id),)).fetchone()
                     if not account: raise ValueError("Akun OAuth belum siap; sambungkan ulang.")
                     multi_publish.validate(account["platform"],caption,bytes(photo or b""))
                     if account["platform"]=="pinterest" and multi_publish.media_kind(bytes(photo or b""))=="video" and not cover:
@@ -712,7 +731,7 @@ def deliver():
 
 
 from workspace_views import register
-register(app, connect, prepare_schema)
+register(app, connect, prepare_schema, record_event)
 
 
 if __name__=="__main__":

@@ -1,5 +1,5 @@
 <h1>Akun sosial</h1>
-<p class="muted">{{ (channels|length) + (social_accounts|length) }} akun tersimpan · Tanpa batas jumlah akun di Stufio</p>
+<p class="muted">{{ (channels|length) + (social_accounts|length) }} akun tersimpan</p>
 
 {% if g.role in ("owner","manager") %}<button type="button" data-open="accounts-dialog">＋ Hubungkan akun baru</button><dialog id="accounts-dialog"><header><h2>Hubungkan akun baru</h2><button type="button" data-close aria-label="Tutup">×</button></header>
 <div class="account-grid">
@@ -38,11 +38,17 @@
 
 </dialog>{% endif %}<h2 class="account-heading">Koneksi tersimpan</h2>
 {% for c in channels %}
-<article class="account-row"><strong>{{ c.title }}</strong><small>{{ c.platform }} · Siap untuk publikasi</small>{% if g.role in ("owner","manager") %}<form method="post" action="/akun/channel/{{c.id}}/lepas">{{csrf()}}<button class="secondary">Lepas dan batalkan jadwal</button></form>{% endif %}</article>
+<article class="account-row"><strong>{{ c.title }}</strong><small>{{ c.platform }} · ID {{c.id}} · {{ "Terhubung" if c.active else "Dilepas" }}</small>{% if c.active and g.role in ("owner","manager") %}<form data-confirm="Lepas akun ini dan batalkan jadwal yang menunggu?" method="post" action="/akun/channel/{{c.id}}/lepas">{{csrf()}}<button class="secondary">Lepas dan batalkan jadwal</button></form>{% endif %}</article>
 {% endfor %}
 {% for c in social_accounts %}
 <article class="account-row">
-  <div><strong>{{ c.title }}</strong><small>{{ provider_labels[c.platform] }} · {{ 'Sambungkan ulang' if c.expired else ('Izin publikasi tersimpan; uji kirim' if c.publish_ready else 'Sambungkan ulang untuk izin publikasi') }}</small></div>
+  <div><strong>{{ c.title }}</strong><small>{{ provider_labels[c.platform] }} · ID {{c.external_id}} · {{ 'Dilepas' if not c.active else 'Sambungkan ulang' if c.expired else ('Izin publikasi tersimpan; uji kirim' if c.publish_ready else 'Sambungkan ulang untuk izin publikasi') }}</small>
+  {% if c.platform in ('youtube','facebook','instagram','threads') %}
+  <small>Sinkronisasi terakhir berhasil · {{ c.synced_at.strftime('%d/%m/%Y %H:%M %Z') if c.synced_at else 'Belum tercatat' }}</small>
+  <small>Hasil terakhir · {{ c.sync_result or 'Belum tercatat' }}</small>
+  {% if c.active and g.role != 'viewer' %}<form method="post" action="{{url_for('sync_activity',page='inbox',aid=c.id)}}">{{csrf()}}<button class="secondary">Sinkronkan interaksi</button></form>{% endif %}
+  {% else %}<small>Sinkronisasi aktivitas belum tersedia</small>{% endif %}
+  </div>
   {% if g.role in ("owner","manager") %}<div class="account-actions">
     {% if c.expired or not c.publish_ready %}
     <form method="post" action="{{ url_for('start_oauth', platform=c.platform) }}">
@@ -50,10 +56,10 @@
       <button class="secondary">Sambungkan ulang</button>
     </form>
     {% endif %}
-    <form method="post" action="{{ url_for('disconnect_oauth', account_id=c.id) }}">
+    {% if c.active %}<form data-confirm="Lepas akun ini dan batalkan jadwal yang menunggu?" method="post" action="{{ url_for('disconnect_oauth', account_id=c.id) }}">
       {{ csrf() }}
-      <button class="secondary">Lepas dari Stufio</button>
-    </form>
+      <button class="secondary">Lepas dan batalkan jadwal</button>
+    </form>{% endif %}
   </div>{% endif %}
 </article>
 {% endfor %}

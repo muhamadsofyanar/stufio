@@ -4,3 +4,8 @@ document.addEventListener('click', event => {
   const closer=event.target.closest('[data-close]');
   if(closer) closer.closest('dialog').close();
 });
+
+document.addEventListener('submit', event => {
+  const message = event.target.dataset.confirm;
+  if (message && !window.confirm(message)) event.preventDefault();
+});

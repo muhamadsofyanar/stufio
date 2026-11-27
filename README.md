@@ -1,4 +1,6 @@
-# Stufio Multi-Workspace
+# Taysriul | Tahap 1
+
+Versi aplikasi berbasis Stufio. Ringkasan perubahan dan hasil pengujian tersedia di TAHAP-1.md.
 
 Aplikasi Flask/Jinja untuk mengelola akun sosial, menulis draf, dan menjadwalkan publikasi per workspace. Gunicorn melayani web, PostgreSQL menyimpan media serta antrean, dan proses worker mengirim kiriman. Antarmuka berbahasa Indonesia dengan jadwal WIB.
 
