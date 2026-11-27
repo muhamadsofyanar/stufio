@@ -6,7 +6,7 @@ function refreshPreview() {
   const targets=Array.from(document.querySelectorAll('[name=channel]:checked'));
   const file=byId('photo').files[0];
   if(file!==lastFile){if(mediaURL) URL.revokeObjectURL(mediaURL);mediaURL=file?URL.createObjectURL(file):'';lastFile=file;}
-  const asset=byId('asset'), src=mediaURL||(asset.value&&'/media/'+asset.value);
+  const asset=byId('asset'), src=mediaURL||(asset.value&&'/media/'+asset.value+'?ws='+byId('compose').dataset.workspace);
   const kind=file?((file.type==='video/mp4'||/\.mp4$/i.test(file.name))?'video':'image'):(asset.value?asset.selectedOptions[0].dataset.kind:'text');
   for(const [id,show] of [['pic',kind==='image'],['vid',kind==='video']]){
     const el=byId(id);el.hidden=!show;
@@ -22,17 +22,21 @@ function refreshPreview() {
   const issues=[];
   for(const target of targets){
     const key=target.dataset.platform;
+    const caption=byId('compose').elements.namedItem('caption_'+target.value)?.value.trim()||text;
+    const max=key==='Telegram'?(kind==='text'?4096:1024):(limits[key]||4096);
+    if(Array.from(caption).length>max) issues.push(target.dataset.title+' melebihi batas caption.');
+    if(!caption&&!src) issues.push('Isi caption atau media untuk '+target.dataset.title+'.');
     if(!capabilities[key]?.includes(kind))issues.push(target.dataset.title+' tidak mendukung media ini.');
     if(key==='pinterest'&&kind==='video'&&!byId('cover').value)issues.push('Pilih cover video Pinterest.');
-    if(key==='youtube'&&(!text||text.split('\n')[0].length>100))issues.push('YouTube memerlukan judul hingga 100 karakter.');
+    if(key==='youtube'&&(!caption||caption.split('\n')[0].length>100))issues.push('YouTube memerlukan judul hingga 100 karakter.');
     if(key==='youtube'&&!byId('youtube_kids').value)issues.push('Pilih audiens YouTube.');
     if(key==='instagram'&&file&&kind==='image'&&file.type!=='image/jpeg')issues.push('Instagram memerlukan JPEG.');
   }
   if(file&&file.size>(kind==='video'?32:8)*1024*1024)issues.push('Ukuran media terlalu besar.');
-  byId('copy').textContent=text|| (src?'':'Pesan Anda akan tampil di sini.');
+  byId('copy').textContent=targets.map(t=>{const override=byId('compose').elements.namedItem('caption_'+t.value)?.value.trim();return override?t.dataset.title+' · '+override:null}).filter(Boolean).concat(text||[]).join('\n\n') || (src?'':'Pesan Anda akan tampil di sini.');
   byId('counter').textContent=length+' / '+limit+' karakter · '+targets.length+' tujuan';
   byId('validation').textContent=issues.join(' ');
-  byId('send').disabled=!targets.length||length>limit||(!length&&!src)||issues.length>0;
+  byId('send').disabled=!targets.length||issues.length>0;
   byId('send').textContent=byId('due').value?'Jadwalkan':'Kirim sekarang';
 }
 byId('compose').addEventListener('input',refreshPreview);

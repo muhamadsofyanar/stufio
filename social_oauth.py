@@ -53,7 +53,7 @@ def instagram_unified():
     return os.getenv("INSTAGRAM_LOGIN_MODE","facebook").strip().lower()=="unified"
 
 
-def provider_for(key):
+def _base_provider(key):
     if key=="instagram" and instagram_unified():
         return Provider("Instagram","Akun Professional (Unified Login)",
                         "https://www.facebook.com/v25.0/dialog/oauth",
@@ -64,7 +64,24 @@ def provider_for(key):
                         "https://www.instagram.com/oauth/authorize",
                         "https://api.instagram.com/oauth/access_token",
                         "instagram_business_basic,instagram_business_content_publish")
+    if key == "youtube" and os.getenv("YOUTUBE_COMMENTS_ENABLED") == "1":
+        from dataclasses import replace
+        return replace(PROVIDERS[key], scope=PROVIDERS[key].scope + " https://www.googleapis.com/auth/youtube.force-ssl")
+    if key == "facebook" and os.getenv("FACEBOOK_MESSENGER_ENABLED") == "1":
+        from dataclasses import replace
+        return replace(PROVIDERS[key], scope=PROVIDERS[key].scope + ",pages_messaging")
     return PROVIDERS[key]
+
+
+def provider_for(key):
+    from dataclasses import replace
+    provider = _base_provider(key)
+    if key=="threads" and os.getenv("THREADS_COMMENTS_ENABLED")=="1":
+        return replace(provider,scope=provider.scope+",threads_read_replies,threads_manage_replies")
+    if key=="instagram" and os.getenv("INSTAGRAM_COMMENTS_ENABLED")=="1":
+        extra="instagram_business_manage_comments" if instagram_direct() else "instagram_manage_comments"
+        return replace(provider,scope=provider.scope+","+extra)
+    return provider
 
 
 def settings(key):

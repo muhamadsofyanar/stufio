@@ -1,0 +1,5 @@
+# Optional local preview alongside docker-compose.yaml
+services:
+  web:
+    ports:
+      - "127.0.0.1:${STUFIO_LOCAL_PORT:-8000}:8000"

@@ -1,52 +1,63 @@
-# Studio Taysriul
+# Stufio Multi-Workspace
 
-Dashboard publikasi multi-platform untuk satu workspace. Foto dan video disimpan di PostgreSQL. Token bot dan URL webhook disimpan terenkripsi. Worker mengirim dari server walaupun browser ditutup. Tidak menggunakan Node.js, Redis atau sharp.
+Aplikasi Flask/Jinja untuk mengelola akun sosial, menulis draf, dan menjadwalkan publikasi per workspace. Gunicorn melayani web, PostgreSQL menyimpan media serta antrean, dan proses worker mengirim kiriman. Antarmuka berbahasa Indonesia dengan jadwal WIB.
 
-## Pasang lewat GitHub dan Coolify
+## Memperbarui instalasi lama
 
-1. Ekstrak ZIP lalu upload seluruh isi, termasuk folder templates, ke root repo GitHub baru.
-2. Buat resource Application baru di Coolify dari repo. Pilih Docker Compose dengan lokasi /docker-compose.yaml.
-3. Isi tiga environment variable runtime: APP_KEY, DB_PASSWORD dan ADMIN_PASSWORD. Untuk setiap nilai jalankan openssl rand -hex 32 secara terpisah. ADMIN_PASSWORD digunakan saat login. Simpan APP_KEY dan password database untuk redeploy dan pemulihan backup.
-4. Pasang subdomain uji HTTPS pada service web dengan target port internal 8000, misalnya https://studio.taysriulqurani.id:8000 di kolom Domains Coolify. Arahkan DNS subdomain ke VPS. Buka alamat HTTPS biasa setelah deploy. Database memakai volume terpisah.
-5. Login, pilih Akun Telegram, masukkan token bot dari BotFather dan @username channel atau ID numeriknya. Pastikan bot adalah admin dengan hak posting.
-6. Uji pada channel privat milik sendiri. Jadwalkan satu foto lima menit ke depan, tutup browser, kemudian cek pesan dan tautan hasil di Kalender. Uji juga perubahan waktu dan pembatalan. Setelah lolos, pindahkan domain utama jika diinginkan.
+Gunakan project Compose dan volume yang saat ini melayani Stufio. Pertahankan konfigurasi runtime, khususnya APP_KEY agar kredensial lama masih dapat didekripsi. ZIP sumber tidak memuat database produksi. Cadangkan dari instalasi aktif **sebelum** menjalankan web atau worker versi baru, karena keduanya menjalankan migrasi saat startup. Contoh pada host Linux dengan Compose dan PostgreSQL client sesuai versi server:
 
-## Perilaku operasional
+```sh
+set -eu
+umask 077
+mkdir -p backups
+backup="backups/stufio-$(date -u +%Y%m%dT%H%M%SZ).dump"
+docker compose -f docker-compose.yaml exec -T db pg_dump -U studio -d studio -Fc > "$backup.tmp"
+pg_restore --list "$backup.tmp" >/dev/null
+mv "$backup.tmp" "$backup"
+```
 
-Satu worker mengambil pekerjaan dengan penguncian database. Kegagalan jaringan setelah kirim menghasilkan status Periksa channel. Jika worker berhenti saat kirim, status dapat tertahan Mengirim. Periksa channel sebelum membuat kiriman pengganti untuk mencegah duplikasi. Jadwal yang sudah lewat diproses setelah worker aktif kembali. Agenda menampilkan maksimal 200 entri. Foto JPEG/PNG dan teks didukung. Dashboard memakai cookie Secure dan memerlukan HTTPS. Cadangkan volume PostgreSQL dan APP_KEY secara terpisah.
+Simpan salinan dump dan APP_KEY di lokasi aman yang terpisah. Uji pemulihan memakai database kosong di host uji dengan `pg_restore --exit-on-error -d NAMA_DATABASE_UJI berkas.dump`. Setelah backup terverifikasi, deploy web dan worker dari versi yang sama. Untuk rollback, arahkan versi sebelumnya ke hasil restore yang terpisah dan rekonsiliasi kiriman setelah waktu backup sebelum menjalankan worker.
 
-Lihat ROADMAP.md untuk 10 langkah pengembangan berikutnya.
+## Menjalankan
 
-## Memperbarui instalasi
+Pada instalasi baru, siapkan APP_KEY, DB_PASSWORD, ADMIN_PASSWORD melalui secret manager atau environment deploy. Gunakan nilai acak yang berbeda. Instalasi lama memakai nilai yang sudah terpasang.
 
-Upload seluruh isi paket ke repo yang sudah dipakai, termasuk publishing.py, templates/ dan static/. Pertahankan APP_KEY, DB_PASSWORD, ADMIN_PASSWORD dan volume studio_db, lalu redeploy web dan worker dari commit yang sama. Pembaruan menambah tabel dan mengisi tipe akun lama sebagai Telegram saat startup. Cadangkan database sebelum pembaruan.
+```sh
+docker compose -f docker-compose.yaml config --quiet
+docker compose -f docker-compose.yaml up -d --build
+docker compose -f docker-compose.yaml ps
+docker compose -f docker-compose.yaml logs --tail=50 web worker
+```
 
-## Alur publikasi
+Di Coolify, arahkan domain HTTPS ke port internal 8000 pada web. Untuk preview di komputer sendiri, jalankan `docker compose -f docker-compose.yaml -f compose.local.yaml up -d --build` kemudian buka `http://localhost:8000`. Cookie sesi menggunakan Secure. Pada domain staging dan produksi gunakan HTTPS. Daftarkan SOCIAL_ORIGIN dan URL callback sesuai panduan konektor di bawah.
 
-1. Tambahkan ide pada Papan ide. Buka Edit atau pindahkan, pilih tahap Draf, lalu buka dari menu Draf.
-2. Unggah JPEG atau PNG melalui Media atau langsung dari editor. Foto yang diunggah dapat digunakan lagi melalui pustaka.
-3. Untuk Discord, buat webhook masuk pada channel teks server sendiri, lalu isi nama dan URL webhook di Akun sosial. Simpan token Telegram atau URL Discord hanya di dashboard.
-4. Di editor pilih satu atau beberapa tujuan. Caption dan foto yang sama akan dikirim ke akun terpilih, dengan pemeriksaan batas panjang masing-masing. Pilih jam WIB atau kirim sekarang. Setiap tujuan mendapat satu baris di kalender. Simpan draf menyimpan isi dan foto; pilih kembali tujuan serta waktu saat membuka draf.
-5. Jika respons penerbit tidak pasti, periksa channel sebelum mengirim ulang. Ringkasan menampilkan apakah worker baru-baru ini aktif.
-6. Di Tautan, buat alamat /r/nama dan lihat jumlah akses. Angka ini mencakup permintaan dari bot dan pembaca pratinjau.
+## Workspace, peran dan publikasi
 
-## Sambungkan akun dalam lima langkah
+- Instalasi baru membuat IzinHukum, StifinMulia dan Muhamad Sofyan. Saat migrasi, data lama tetap berada di **Studio lama**. Nama dapat diganti setelah pemiliknya ditentukan.
+- Admin utama masuk dengan kolom nama pengguna kosong dan ADMIN_PASSWORD. Melalui **Tim & pengaturan** ia dapat membuat workspace, mendaftarkan pengguna, serta menetapkan akses. Kata sandi untuk pengguna baru minimal 12 karakter. Saat nama pengguna sudah ada, pemberian akses memakai identitas yang sama dan mempertahankan kata sandinya.
+- Pengelola mengatur tim, nama workspace, dan koneksi akun. Editor mengelola konten, mengirim, menyinkronkan laporan dan membalas jika izin kanal tersedia. Pembaca dapat melihat konten serta mengekspor laporan. Server memeriksa keanggotaan dan peran pada setiap permintaan terlindungi.
+- Pilih workspace di sidebar lalu **Pindah**. Pergantian memperbarui token formulir agar tab lama tidak mengirim data ke tujuan yang baru.
+- Hubungkan akun melalui **Akun sosial**. Ulangi untuk akun tambahan. Buka **Buat post**, pilih akun, pilih atau unggah media, dan isi caption. Caption, pilihan akun, media, waktu, sampul, dan opsi YouTube dapat disimpan dalam draf. Caption khusus per akun menggantikan caption umum pada tujuan tersebut.
+- Setiap tujuan mendapat job sendiri. Kalender WIB menampilkan jumlah per hari serta maksimal 200 detail dalam bulan terpilih. Worker mengunci job sebelum mengirim. **Sudah terbit** menampilkan hasil dengan status Terbit. Kiriman berstatus Diproses platform, Draf platform, atau Periksa channel dapat dilihat di kalender.
+- Satu post mendukung satu JPEG/PNG atau MP4 sesuai batas kanal. Pustaka media mendukung penggunaan ulang. Papan ide serta tautan pendek tetap tersedia.
+- Per workspace, akun, aset, job, draf, OAuth state, submissions, tautan dan aktivitas memiliki tabel PostgreSQL terpisah. Workspace awal memakai schema public untuk kompatibilitas. Workspace berikutnya memakai schema dengan ID internal. Registry workspace dan identitas pengguna berada di public. Worker dan callback memilih workspace di server. URL media publik ditandatangani bersama ID workspace dan waktu kedaluwarsa.
 
-1. **Perbarui Stufio.** Deploy paket terbaru melalui Docker Compose. Pertahankan volume PostgreSQL dan APP_KEY lama. Isi `SOCIAL_ORIGIN` dengan domain HTTPS publik service web, misalnya `https://studio.example.com`, tanpa path.
-2. **Siapkan aplikasi pengembang.** Isi pasangan variabel di bawah pada konfigurasi deploy. Di portal platform, daftarkan callback persis sebagai `<SOCIAL_ORIGIN>/akun/oauth/<slug>/callback`. Aktifkan produk, izin dan akun penguji yang diperlukan. Gunakan OAuth 2.0 Web App dengan client secret untuk X.
-3. **Sambungkan Telegram dan Discord.** Di **Akun sosial**, masukkan token bot serta ID/username channel atau grup Telegram dengan bot sebagai admin. Untuk Discord, gunakan webhook masuk dari channel teks. Ulangi untuk tiap tujuan.
-4. **Sambungkan akun OAuth.** Pilih platform, masuk di halaman resmi platform, lalu berikan izin. Untuk Meta, pilih aset yang ingin diotorisasi. Stufio menyimpan seluruh aset relevan yang dikembalikan oleh API. Ulangi dengan akun lain sesuai kebutuhan. Menyambungkan ulang identitas yang sama memperbarui koneksi lama.
-5. **Periksa koneksi.** Pastikan akun muncul di daftar, lalu coba tambah akun ketiga dan sambungkan ulang salah satu akun. Token disimpan terenkripsi. Gunakan **Lepas dari Stufio** untuk menghapus koneksi OAuth lokal. Untuk mencabut izin di platform, gunakan pengaturan akun platform.
+## Komentar, pesan, dan laporan
 
-| Platform | Slug callback | Variabel lingkungan | Produk atau tipe akun |
-|---|---|---|---|
-| Instagram | `instagram` | `INSTAGRAM_CLIENT_ID`, `INSTAGRAM_CLIENT_SECRET` | Instagram API dengan Facebook Login untuk akun Business/Creator yang tertaut ke Halaman Facebook |
-| Threads | `threads` | `THREADS_CLIENT_ID`, `THREADS_CLIENT_SECRET` | Threads API dengan izin `threads_basic` |
-| Facebook | `facebook` | `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET` | Facebook Login dan akses Pages |
-| TikTok | `tiktok` | `TIKTOK_CLIENT_ID`, `TIKTOK_CLIENT_SECRET` | Login Kit untuk Web. Isi Client Key pada variabel `TIKTOK_CLIENT_ID` |
-| LinkedIn | `linkedin` | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Sign In with LinkedIn using OpenID Connect untuk profil |
-| YouTube | `youtube` | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` | OAuth client tipe Web dan YouTube Data API v3 |
-| X | `x` | `X_CLIENT_ID`, `X_CLIENT_SECRET` | X API dengan akses profil pengguna |
-| Pinterest | `pinterest` | `PINTEREST_CLIENT_ID`, `PINTEREST_CLIENT_SECRET` | Pinterest API dengan izin `user_accounts:read` |
+Kotak masuk menyinkronkan atas permintaan hingga 100 thread komentar terbaru per akun YouTube dan pesan terakhir dari maksimal 50 percakapan Messenger per Facebook Page. Data tersimpan per akun dan dapat ditinjau sesudah pengguna keluar. UI menampilkan hingga 300 item per tampilan. Instagram dan Threads memuat hingga 50 komentar atau balasan tingkat pertama dari masing-masing 10 postingan terbaru. Sinkronisasi belum mengambil seluruh riwayat maupun webhook. Waktu di kartu adalah waktu sinkronisasi.
 
-Stufio tidak membatasi jumlah akun tersimpan. Akses API, persetujuan aplikasi, kuota, dan biaya tetap mengikuti platform. Delapan konektor OAuth memiliki adapter publikasi pada rilis ini; fitur dan ketersediaan aktual mengikuti izin API. Lihat UPDATE-MULTIPLATFORM.md untuk matriks dukungan, langkah migrasi dan pengujian. Untuk akun OAuth dengan masa aktif token yang diketahui, Stufio menampilkan status sambungkan ulang setelah token kedaluwarsa. Jika akses dicabut di platform, sambungkan ulang dari kartu platform.
+Untuk komentar Instagram atau balasan Threads, aktifkan INSTAGRAM_COMMENTS_ENABLED=1 atau THREADS_COMMENTS_ENABLED=1 dan minta izin di dashboard developer. Dalam mode Instagram Unified tambahkan izin komentar pada konfigurasi login Meta. Sambungkan ulang akun. Untuk membalas komentar YouTube, aktifkan YOUTUBE_COMMENTS_ENABLED=1 dan sambungkan ulang akun dengan persetujuan youtube.force-ssl. Untuk Messenger aktifkan FACEBOOK_MESSENGER_ENABLED=1, siapkan izin pages_messaging di aplikasi Meta, dan sambungkan ulang Page. Pengiriman mengikuti batas waktu dan aturan platform. Balasan berstatus Periksa platform memerlukan verifikasi manual. Aplikasi mencatat percobaan sebelum pengiriman untuk mencegah pengulangan ketika respons jaringan terputus.
+
+Laporan mengambil viewCount, subscriberCount yang ditampilkan kanal, dan videoCount dari YouTube. CSV memuat snapshot terakhir per akun. Instagram menyediakan followers_count dan media_count. Facebook Page menyediakan followers_count dan fan_count bila tersedia. Kanal lain belum memiliki pengambilan metrik di versi ini. Nomor pada dashboard publikasi berasal dari database antrean. Akun dengan token kedaluwarsa saat sinkronisasi mungkin perlu disambungkan ulang.
+
+## Integrasi dan pengujian
+
+Lihat [panduan adapter publikasi](UPDATE-MULTIPLATFORM.md), [catatan Instagram](UPDATE-INSTAGRAM.md), [laporan pengembangan dan pengujian](HASIL-UJI.md), serta [panduan pemasangan versi sebelumnya](PANDUAN-LAMA.md). Catatan rilis lama mendeskripsikan versi sebelum multi-workspace.
+
+```sh
+python -m unittest discover -s tests -v
+python -m py_compile *.py
+node --check static/composer.js
+```
+
+Untuk menjalankan juga pengujian PostgreSQL, siapkan **database khusus uji kosong** dengan pgcrypto, arahkan PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD ke sana, isi APP_KEY dan ADMIN_PASSWORD khusus uji, lalu jalankan `STUFIO_TEST_DATABASE=1 python -m unittest discover -s tests -v`. Suite membuat workspace dan data uji. Frontend memakai Jinja, CSS, dan JavaScript yang langsung dilayani Flask.

@@ -1,7 +1,7 @@
 <h1>Akun sosial</h1>
 <p class="muted">{{ (channels|length) + (social_accounts|length) }} akun tersimpan · Tanpa batas jumlah akun di Stufio</p>
 
-<h2>Hubungkan akun baru</h2>
+{% if g.role in ("owner","manager") %}<h2>Hubungkan akun baru</h2>
 <div class="account-grid">
   <details class="account-card">
     <summary><strong>Telegram</strong><small>Channel dan grup</small></summary>
@@ -36,14 +36,14 @@
   {% endfor %}
 </div>
 
-<h2 class="account-heading">Koneksi tersimpan</h2>
+{% endif %}<h2 class="account-heading">Koneksi tersimpan</h2>
 {% for c in channels %}
-<article class="account-row"><strong>{{ c.title }}</strong><small>{{ c.platform }} · Siap untuk publikasi</small></article>
+<article class="account-row"><strong>{{ c.title }}</strong><small>{{ c.platform }} · Siap untuk publikasi</small>{% if g.role in ("owner","manager") %}<form method="post" action="/akun/channel/{{c.id}}/lepas">{{csrf()}}<button class="secondary">Lepas dan batalkan jadwal</button></form>{% endif %}</article>
 {% endfor %}
 {% for c in social_accounts %}
 <article class="account-row">
   <div><strong>{{ c.title }}</strong><small>{{ provider_labels[c.platform] }} · {{ 'Sambungkan ulang' if c.expired else ('Izin publikasi tersimpan; uji kirim' if c.publish_ready else 'Sambungkan ulang untuk izin publikasi') }}</small></div>
-  <div class="account-actions">
+  {% if g.role in ("owner","manager") %}<div class="account-actions">
     {% if c.expired or not c.publish_ready %}
     <form method="post" action="{{ url_for('start_oauth', platform=c.platform) }}">
       {{ csrf() }}
@@ -54,7 +54,7 @@
       {{ csrf() }}
       <button class="secondary">Lepas dari Stufio</button>
     </form>
-  </div>
+  </div>{% endif %}
 </article>
 {% endfor %}
 {% if not channels and not social_accounts %}<p class="muted">Belum ada akun tersimpan.</p>{% endif %}

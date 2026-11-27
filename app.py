@@ -1,3 +1,7 @@
+import calendar
+from contextvars import ContextVar
+from werkzeug.security import check_password_hash
+from psycopg import sql
 import hashlib
 import hmac
 import json
@@ -11,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 import requests
-from flask import Flask, Response, abort, flash, redirect, render_template, request, session
+from flask import Flask, g, has_request_context, Response, abort, flash, redirect, render_template, request, session
 from psycopg.rows import dict_row
 
 import social_oauth
@@ -25,12 +29,36 @@ app.config.update(MAX_CONTENT_LENGTH=34*1024**2, SESSION_COOKIE_SECURE=True,
 WIB = ZoneInfo("Asia/Jakarta")
 
 
-def connect():
+worker_workspace = ContextVar("worker_workspace", default=1)
+
+
+def schema_for(wid):
+    return "public" if wid == 1 else f"studio_ws_{int(wid)}"
+
+
+def raw_connection():
     return psycopg.connect("", row_factory=dict_row)
 
 
-with connect() as db:
-    db.execute("SELECT pg_advisory_xact_lock(782391)")
+def set_workspace(db, wid):
+    db.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(schema_for(wid))))
+
+
+def connect():
+    db = raw_connection()
+    try:
+        wid = g.workspace_id if has_request_context() else worker_workspace.get()
+        set_workspace(db, wid)
+        return db
+    except Exception:
+        db.close()
+        raise
+
+
+def prepare_schema(db, wid):
+    schema = sql.Identifier(schema_for(wid))
+    db.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
+    set_workspace(db, wid)
     db.execute("""CREATE EXTENSION IF NOT EXISTS pgcrypto;
     CREATE TABLE IF NOT EXISTS channels (
       id bigint PRIMARY KEY, title text NOT NULL, token bytea NOT NULL);
@@ -40,9 +68,11 @@ with connect() as db:
       state text NOT NULL DEFAULT 'Terjadwal', note text, link text);
     ALTER TABLE channels ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT 'Telegram';
     ALTER TABLE channels ADD COLUMN IF NOT EXISTS guild text;
+    ALTER TABLE channels ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
     CREATE TABLE IF NOT EXISTS assets(id bigserial PRIMARY KEY,name text NOT NULL,photo bytea NOT NULL);
     CREATE TABLE IF NOT EXISTS editorial(id bigserial PRIMARY KEY,body text NOT NULL,stage text NOT NULL,
                                          asset bigint REFERENCES assets);
+    ALTER TABLE editorial ADD COLUMN IF NOT EXISTS composer jsonb NOT NULL DEFAULT '{}';
     CREATE TABLE IF NOT EXISTS shortlinks(slug text PRIMARY KEY, destination text NOT NULL,
       title text NOT NULL, clicks bigint NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS worker_status(id integer PRIMARY KEY, seen timestamptz NOT NULL);
@@ -61,7 +91,45 @@ with connect() as db:
     CREATE TABLE IF NOT EXISTS oauth_attempts (
       state text PRIMARY KEY, platform text NOT NULL, session_hash text NOT NULL,
       verifier text NOT NULL, created timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS activity(account bigint REFERENCES oauth_accounts ON DELETE CASCADE,kind text NOT NULL,
+        external_id text NOT NULL,label text NOT NULL,body text NOT NULL,video text,observed timestamptz DEFAULT now(),
+        PRIMARY KEY(account,kind,external_id));
+    ALTER TABLE activity ADD COLUMN IF NOT EXISTS reply_to text;
+    ALTER TABLE activity ADD COLUMN IF NOT EXISTS reply_state text;
+    ALTER TABLE activity ADD COLUMN IF NOT EXISTS reply_body text;
     CREATE TABLE IF NOT EXISTS submissions(nonce text PRIMARY KEY, created timestamptz DEFAULT now());""")
+
+
+with raw_connection() as db:
+    db.execute("SELECT pg_advisory_xact_lock(782391)")
+    db.execute("""CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+        CREATE TABLE IF NOT EXISTS public.workspaces(id bigserial PRIMARY KEY, name text NOT NULL);
+        CREATE TABLE IF NOT EXISTS public.studio_users(id bigserial PRIMARY KEY, login text UNIQUE NOT NULL, password_hash text NOT NULL);
+        CREATE TABLE IF NOT EXISTS public.memberships(workspace bigint REFERENCES public.workspaces, member bigint REFERENCES public.studio_users,
+            role text NOT NULL CHECK(role IN ('manager','editor','viewer')), PRIMARY KEY(workspace,member));""")
+    if not db.execute("SELECT 1 FROM public.workspaces LIMIT 1").fetchone():
+        legacy = db.execute("SELECT to_regclass('public.channels') IS NOT NULL AS present").fetchone()["present"]
+        names = ["IzinHukum", "StifinMulia", "Muhamad Sofyan"]
+        if legacy:
+            names.insert(0, "Studio lama")
+        for name in names:
+            db.execute("INSERT INTO public.workspaces(name) VALUES (%s)", (name,))
+    for row in db.execute("SELECT id FROM public.workspaces ORDER BY id").fetchall():
+        prepare_schema(db, row["id"])
+
+
+def available(db):
+    if session.get("admin"):
+        return db.execute("SELECT id,name,'owner' AS role FROM public.workspaces ORDER BY id").fetchall()
+    return db.execute("""SELECT w.id,w.name,m.role FROM public.memberships m JOIN public.workspaces w ON w.id=m.workspace
+        WHERE member=%s ORDER BY w.id""",(session.get("user"),)).fetchall()
+
+
+@app.after_request
+def cache_policy(response):
+    if request.endpoint != "static":
+        response.headers["Cache-Control"]="private, no-store"
+    return response
 
 
 def telegram(token, method, data, files=None):
@@ -82,16 +150,54 @@ def protect():
     if request.method == "POST" and not hmac.compare_digest(
             str(request.form.get("csrf","")).encode(), session["csrf"].encode()):
         abort(403)
-    if request.endpoint in {"static","open_link","publish_media"}:
+    if request.endpoint in {"static","login"}:
         return
-    if request.path != "/login" and not session.get("admin"):
+    if request.endpoint in {"open_link","publish_media"}:
+        g.workspace_id = (request.view_args or {}).get("wid", 1)
+        return
+    if not (session.get("admin") or session.get("user")):
         return redirect("/login")
+    if request.endpoint == "logout":
+        return
+    with raw_connection() as db:
+        g.workspaces = available(db)
+    if not g.workspaces:
+        abort(403)
+    active = session.get("workspace", g.workspaces[0]["id"])
+    current = next((row for row in g.workspaces if row["id"] == active), None)
+    if not current:
+        if request.method != "GET": abort(403)
+        current = g.workspaces[0]
+    g.workspace_id, g.role, g.workspace_name = current["id"], current["role"], current["name"]
+    if request.args.get("ws") is not None and request.args.get("ws", type=int) != g.workspace_id:
+        abort(409)
+    management = {"start_oauth","finish_oauth","disconnect_oauth","disconnect_channel","add_discord","account","settings"}
+    if request.endpoint in management and g.role not in ("owner","manager"):
+        abort(403)
+    if request.method == "POST" and request.endpoint != "switch_workspace" and g.role == "viewer":
+        abort(403)
+
+
+@app.post("/workspace/switch")
+def switch_workspace():
+    wid = request.form.get("workspace",type=int)
+    if wid not in [row["id"] for row in g.workspaces]: abort(403)
+    session.update(workspace=wid, csrf=secrets.token_urlsafe(24))
+    return redirect("/")
 
 
 @app.route("/login", methods=["GET","POST"])
 def login():
     if request.method == "POST":
-        if hmac.compare_digest(request.form["password"].encode(), os.environ["ADMIN_PASSWORD"].encode()):
+        login_name=request.form.get("login","").strip().casefold()
+        if login_name:
+            with raw_connection() as db:
+                user=db.execute("SELECT * FROM public.studio_users WHERE login=%s",(login_name,)).fetchone()
+            if user and check_password_hash(user["password_hash"],request.form["password"]):
+                session.clear()
+                session.update(user=user["id"], csrf=secrets.token_urlsafe(24))
+                return redirect("/")
+        elif hmac.compare_digest(request.form["password"].encode(), os.environ["ADMIN_PASSWORD"].encode()):
             session.clear()
             session.update(admin=True, csrf=secrets.token_urlsafe(24))
             return redirect("/")
@@ -107,11 +213,13 @@ def logout():
 
 
 @app.route("/")
-@app.route("/<any(akun,buat,kalender):page>")
+@app.route("/<any(akun,buat,kalender,terbit):page>")
 def dashboard(page="ringkasan"):
+    if page == "buat" and g.role == "viewer":
+        abort(403)
     if page == "akun":
         with connect() as db:
-            channels = db.execute("SELECT id,title,platform FROM channels ORDER BY title").fetchall()
+            channels = db.execute("SELECT id,title,platform FROM channels WHERE active ORDER BY title").fetchall()
             accounts = db.execute("""SELECT id,platform,title,publish_ready,(expires_at <= now() AND NOT refreshable) AS expired
                                       FROM oauth_accounts ORDER BY title, id""").fetchall()
         providers = [(key, provider, bool(social_oauth.settings(key)))
@@ -120,7 +228,7 @@ def dashboard(page="ringkasan"):
                                social_accounts=accounts, providers=providers,
                                provider_labels={key: provider.label for key, provider, _ in providers})
     with connect() as db:
-        channels = db.execute("SELECT id,title,platform FROM channels ORDER BY title").fetchall()
+        channels = db.execute("SELECT id,title,platform FROM channels WHERE active ORDER BY title").fetchall()
         channels += [{**row, "id": "oauth:"+str(row["id"]), "platform": multi_publish.LABELS[row["platform"]],
                       "key": row["platform"]} for row in db.execute("""SELECT id,title,platform FROM oauth_accounts
                       WHERE publish_ready AND (expires_at IS NULL OR expires_at > now() OR refreshable) ORDER BY title""").fetchall()
@@ -138,15 +246,26 @@ def dashboard(page="ringkasan"):
                             count(*) FILTER (WHERE state='Terbit') AS sent,
                             count(*) FILTER (WHERE state IN ('Gagal','Periksa channel')) AS issues
                             FROM posts""").fetchone()
+        month = request.args.get("month") or datetime.now(WIB).strftime("%Y-%m")
+        weeks, day_counts = [], {}
+        if page == "kalender":
+            try:
+                first = datetime.strptime(month, "%Y-%m").replace(tzinfo=WIB)
+                end = (first + timedelta(days=32)).replace(day=1)
+            except (ValueError, OverflowError):
+                abort(400)
+            weeks = calendar.monthcalendar(first.year, first.month)
+            day_counts = {row["day"]:row["n"] for row in db.execute("""SELECT extract(day FROM due AT TIME ZONE 'Asia/Jakarta')::int AS day,count(*) AS n
+                FROM posts WHERE due >= %s AND due < %s GROUP BY 1""", (first,end))}
         posts = db.execute("""SELECT p.id,body,due,state,note,link,COALESCE(c.title,p.target_title,'Akun dilepas') AS title FROM posts p
                             LEFT JOIN channels c ON p.channel=c.id
-                            ORDER BY (state='Terjadwal') DESC,
-                            CASE WHEN state='Terjadwal' THEN due END ASC,due DESC LIMIT 200""").fetchall()
+                            WHERE (%s <> 'terbit' OR state='Terbit') AND (%s <> 'kalender' OR (due >= %s AND due < %s)) ORDER BY (state='Terjadwal') DESC,
+                            CASE WHEN state='Terjadwal' THEN due END ASC,due DESC LIMIT 200""",(page,page,first if weeks else None,end if weeks else None)).fetchall()
     for post in posts:
         post["local"] = post["due"].astimezone(WIB)
     if page=="kalender":
         posts.sort(key=lambda p:p["local"])
-    return render_template("studio.html", page=page, channels=channels, posts=posts, totals=totals, draft=draft, media=media, heartbeat=heartbeat, nonce=secrets.token_urlsafe(18))
+    return render_template("studio.html", page=page, channels=channels, posts=posts, totals=totals, draft=draft, media=media, heartbeat=heartbeat, weeks=weeks, month=month, day_counts=day_counts, nonce=secrets.token_urlsafe(18))
 
 
 @app.post("/akun")
@@ -169,8 +288,8 @@ def account():
         else:
             raise ValueError("Pilih channel atau grup Telegram.")
         with connect() as db:
-            db.execute("""INSERT INTO channels(id,title,token) VALUES (%s,%s,pgp_sym_encrypt(%s,%s))
-                       ON CONFLICT(id) DO UPDATE SET title=excluded.title, token=excluded.token""",
+            db.execute("""INSERT INTO channels(id,title,token) VALUES (%s,%s,public.pgp_sym_encrypt(%s,%s))
+                       ON CONFLICT(id) DO UPDATE SET active=true,title=excluded.title, token=excluded.token""",
                        (chat["id"],chat["title"],token,app.secret_key))
         flash("Channel terhubung.")
     except (ValueError,RuntimeError) as err:
@@ -235,7 +354,7 @@ def finish_oauth(platform):
                 expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(lifetime))
                               if str(lifetime).isdigit() and 0 < int(lifetime) < 10**9 else None)
                 db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential,expires_at,publish_ready,refreshable)
-                              VALUES (%s,%s,%s,pgp_sym_encrypt(%s,%s),%s,%s,%s)
+                              VALUES (%s,%s,%s,public.pgp_sym_encrypt(%s,%s),%s,%s,%s)
                               ON CONFLICT (platform,external_id) DO UPDATE SET
                               title=excluded.title, credential=excluded.credential,
                               expires_at=excluded.expires_at,publish_ready=excluded.publish_ready,refreshable=excluded.refreshable""",
@@ -258,6 +377,18 @@ def disconnect_oauth(account_id):
         deleted = db.execute("DELETE FROM oauth_accounts WHERE id=%s", (account_id,)).rowcount
     if deleted:
         flash("Koneksi akun di Stufio dihapus.")
+    return redirect("/akun")
+
+
+@app.post("/akun/channel/<channel>/lepas")
+def disconnect_channel(channel):
+    if not re.fullmatch(r"-?[0-9]{1,19}",channel): abort(400)
+    with connect() as db:
+        account=db.execute("SELECT id FROM channels WHERE id=%s AND active FOR UPDATE",(int(channel),)).fetchone()
+        if not account: abort(404)
+        db.execute("UPDATE channels SET active=false,token=public.pgp_sym_encrypt('',%s) WHERE id=%s",(app.secret_key,account["id"]))
+        db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE channel=%s AND state='Terjadwal'",(account["id"],))
+    flash("Akun dilepas. Jadwal yang masih menunggu dibatalkan.")
     return redirect("/akun")
 
 
@@ -286,8 +417,10 @@ def links():
     return render_template("studio.html",page="tautan",links=rows)
 
 
+@app.get("/w/<int:wid>/r/<slug>")
 @app.get("/r/<slug>")
-def open_link(slug):
+def open_link(slug,wid=1):
+    validate_public_workspace(wid)
     with connect() as db:
         row=db.execute("UPDATE shortlinks SET clicks=clicks+1 WHERE slug=%s RETURNING destination",(slug,)).fetchone()
     if not row:
@@ -373,8 +506,8 @@ def add_discord():
             raise ValueError("Gunakan webhook masuk dari channel server Discord.")
         with connect() as db:
             db.execute("""INSERT INTO channels(id,title,token,platform,guild) VALUES
-                 (%s,%s,pgp_sym_encrypt(%s,%s),'Discord',%s) ON CONFLICT(id) DO UPDATE SET
-                 title=excluded.title,token=excluded.token,guild=excluded.guild""",
+                 (%s,%s,public.pgp_sym_encrypt(%s,%s),'Discord',%s) ON CONFLICT(id) DO UPDATE SET
+                 active=true,title=excluded.title,token=excluded.token,guild=excluded.guild""",
                  (int(hook["id"]),request.form["title"].strip() or hook["name"],url,app.secret_key,hook["guild_id"]))
         flash("Webhook Discord terhubung.")
     except (RuntimeError, ValueError) as err:
@@ -386,6 +519,7 @@ def add_discord():
 def create():
     body = request.form["body"].strip()
     targets = list(dict.fromkeys(request.form.getlist("channel")))
+    overrides = {cid:request.form.get("caption_"+cid,"").strip() for cid in targets if request.form.get("caption_"+cid,"").strip()}
     draft = request.form.get("draft", type=int)
     try:
         photo = photo_upload()
@@ -408,13 +542,14 @@ def create():
                 if not row:
                     raise ValueError("Foto tidak tersedia.")
                 photo=row["photo"]
-            if not body and not photo:
+            if not body and not photo and not (targets and all(cid in overrides for cid in targets)):
                 raise ValueError("Tulis pesan atau pilih foto.")
             if request.form.get("action")=="draft":
+                composer = json.dumps(dict(targets=targets, captions=overrides, **{key:request.form.get(key,"") for key in ("due","cover","youtube_privacy","youtube_kids")}))
                 if draft:
-                    db.execute("UPDATE editorial SET body=%s,asset=%s WHERE id=%s",(body,aid,draft))
+                    db.execute("UPDATE editorial SET body=%s,asset=%s,composer=%s::jsonb WHERE id=%s",(body,aid,composer,draft))
                 else:
-                    db.execute("INSERT INTO editorial(body,asset,stage) VALUES(%s,%s,'Draf')",(body,aid))
+                    db.execute("INSERT INTO editorial(body,asset,stage,composer) VALUES(%s,%s,'Draf',%s::jsonb)",(body,aid,composer))
                 flash("Draf tersimpan.")
                 return redirect("/studio/draf")
             if not targets:
@@ -427,13 +562,14 @@ def create():
                     raise ValueError("Cover harus berupa foto dari pustaka.")
                 cover=row["photo"]
             for cid in targets:
+                caption = overrides.get(cid, body)
                 if cid.startswith("oauth:"):
                     account_id = cid.removeprefix("oauth:")
                     if not account_id.isdecimal(): raise ValueError("Akun tidak valid.")
                     account=db.execute("""SELECT id,title,platform FROM oauth_accounts WHERE id=%s AND publish_ready
                         AND (expires_at IS NULL OR expires_at > now() OR refreshable)""",(int(account_id),)).fetchone()
                     if not account: raise ValueError("Akun OAuth belum siap; sambungkan ulang.")
-                    multi_publish.validate(account["platform"],body,bytes(photo or b""))
+                    multi_publish.validate(account["platform"],caption,bytes(photo or b""))
                     if account["platform"]=="pinterest" and multi_publish.media_kind(bytes(photo or b""))=="video" and not cover:
                         raise ValueError("Pilih foto cover untuk video Pinterest.")
                     options={}
@@ -444,13 +580,13 @@ def create():
                             raise ValueError("Pilih visibilitas dan audiens anak YouTube.")
                         options={"privacy":privacy,"kids":kids=="yes"}
                     db.execute("INSERT INTO posts(oauth_id,target_title,body,photo,due,cover,publish_options) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
-                               (account["id"],account["title"],body,photo,due,cover if account["platform"]=="pinterest" else None,json.dumps(options)))
+                               (account["id"],account["title"],caption,photo,due,cover if account["platform"]=="pinterest" else None,json.dumps(options)))
                 else:
                     if not re.fullmatch(r"-?[0-9]{1,19}",cid): raise ValueError("Akun tidak valid.")
-                    account=db.execute("SELECT platform FROM channels WHERE id=%s",(int(cid),)).fetchone()
+                    account=db.execute("SELECT platform FROM channels WHERE id=%s AND active FOR SHARE",(int(cid),)).fetchone()
                     if not account: raise ValueError("Akun tidak tersedia.")
-                    multi_publish.validate(account["platform"],body,bytes(photo or b""))
-                    db.execute("INSERT INTO posts(channel,body,photo,due) VALUES(%s,%s,%s,%s)",(int(cid),body,photo,due))
+                    multi_publish.validate(account["platform"],caption,bytes(photo or b""))
+                    db.execute("INSERT INTO posts(channel,body,photo,due) VALUES(%s,%s,%s,%s)",(int(cid),caption,photo,due))
             if draft:
                 db.execute("UPDATE editorial SET stage='Dipakai' WHERE id=%s",(draft,))
         flash("Kiriman masuk antrean.")
@@ -471,16 +607,25 @@ def change(pid):
         flash("Jadwal diperbarui." if changed.rowcount else "Postingan sudah diproses.")
     return redirect("/kalender")
 
+def validate_public_workspace(wid):
+    with raw_connection() as db:
+        if not db.execute("SELECT 1 FROM public.workspaces WHERE id=%s",(wid,)).fetchone(): abort(404)
+
+
 def public_media_url(pid, kind="media"):
     origin=os.getenv("SOCIAL_ORIGIN","").rstrip("/")
     expires=int(time.time())+3600
-    signature=hmac.new(app.secret_key.encode(),f"publish:{kind}:{pid}:{expires}".encode(),hashlib.sha256).hexdigest()
-    return f"{origin}/publish-media/{kind}/{pid}/{expires}/{signature}"
+    wid=worker_workspace.get()
+    signature=hmac.new(app.secret_key.encode(),f"publish:{wid}:{kind}:{pid}:{expires}".encode(),hashlib.sha256).hexdigest()
+    return f"{origin}/w/{wid}/publish-media/{kind}/{pid}/{expires}/{signature}"
 
 
+@app.route("/w/<int:wid>/publish-media/<any(media,cover):kind>/<int:pid>/<int:expires>/<signature>", methods=["GET","HEAD"])
 @app.route("/publish-media/<any(media,cover):kind>/<int:pid>/<int:expires>/<signature>", methods=["GET","HEAD"])
-def publish_media(kind,pid,expires,signature):
-    expected=hmac.new(app.secret_key.encode(),f"publish:{kind}:{pid}:{expires}".encode(),hashlib.sha256).hexdigest()
+def publish_media(kind,pid,expires,signature,wid=1):
+    validate_public_workspace(wid)
+    prefix=f"publish:{wid}" if "wid" in request.view_args else "publish"
+    expected=hmac.new(app.secret_key.encode(),f"{prefix}:{kind}:{pid}:{expires}".encode(),hashlib.sha256).hexdigest()
     if expires < time.time() or not hmac.compare_digest(expected,signature): abort(404)
     with connect() as db:
         row=db.execute("SELECT photo,cover FROM posts WHERE id=%s AND oauth_id IS NOT NULL AND state IN ('Mengirim','Terbit','Diproses platform')",(pid,)).fetchone()
@@ -497,7 +642,7 @@ def publish_media(kind,pid,expires,signature):
 
 def deliver():
     with connect() as db:
-        item=db.execute("""SELECT p.*,c.platform,c.guild,pgp_sym_decrypt(c.token,%s) AS secret FROM posts p
+        item=db.execute("""SELECT p.*,c.platform,c.guild,public.pgp_sym_decrypt(c.token,%s) AS secret FROM posts p
           LEFT JOIN channels c ON c.id=p.channel WHERE state='Terjadwal' AND due<=now()
           ORDER BY due,p.id LIMIT 1 FOR UPDATE OF p SKIP LOCKED""",(app.secret_key,)).fetchone()
         if not item:
@@ -509,7 +654,7 @@ def deliver():
     try:
         if item["oauth_id"] is not None:
             with connect() as db:
-                account=db.execute("""SELECT *,pgp_sym_decrypt(credential,%s) AS secret FROM oauth_accounts
+                account=db.execute("""SELECT *,public.pgp_sym_decrypt(credential,%s) AS secret FROM oauth_accounts
                     WHERE id=%s AND publish_ready FOR UPDATE""",(app.secret_key,item["oauth_id"])).fetchone()
                 if not account: raise ValueError("Akun OAuth dilepas atau perlu disambungkan ulang.")
                 credentials=json.loads(account["secret"])
@@ -518,9 +663,9 @@ def deliver():
                     credentials=social_oauth.refresh(account["platform"],credentials)
                     lifetime=int(credentials.get("expires_in",3600))
                     # Some providers rotate a refresh token shared by several selected boards/channels.
-                    db.execute("""UPDATE oauth_accounts SET credential=pgp_sym_encrypt(%s,%s),
+                    db.execute("""UPDATE oauth_accounts SET credential=public.pgp_sym_encrypt(%s,%s),
                         expires_at=now()+%s*interval '1 second',refreshable=%s
-                        WHERE platform=%s AND (id=%s OR (pgp_sym_decrypt(credential,%s)::jsonb->>'refresh_token')=%s)""",
+                        WHERE platform=%s AND (id=%s OR (public.pgp_sym_decrypt(credential,%s)::jsonb->>'refresh_token')=%s)""",
                         (json.dumps(credentials),app.secret_key,lifetime,bool(credentials.get("refresh_token")),
                          account["platform"],account["id"],app.secret_key,old_refresh))
             media=bytes(item["photo"] or b"")
@@ -562,15 +707,27 @@ def deliver():
     return True
 
 
+from workspace_views import register
+register(app, connect, prepare_schema)
+
+
 if __name__=="__main__":
     last_ping=0
     while True:
-        if time.monotonic()-last_ping >= 15:
-            with connect() as db:
-                db.execute("""UPDATE posts SET state='Periksa channel',note='Worker terhenti; periksa platform sebelum mengirim ulang.'
-                    WHERE state='Mengirim' AND (claimed_at IS NULL OR claimed_at < now()-interval '30 minutes')""")
-                db.execute("""INSERT INTO worker_status VALUES (1,now())
-                           ON CONFLICT(id) DO UPDATE SET seen=excluded.seen""")
+        with raw_connection() as registry:
+            spaces=registry.execute("SELECT id FROM public.workspaces ORDER BY id").fetchall()
+        ping=time.monotonic()-last_ping >= 15
+        worked=False
+        for space in spaces:
+            worker_workspace.set(space["id"])
+            if ping:
+                with connect() as db:
+                    db.execute("""UPDATE posts SET state='Periksa channel',note='Worker terhenti; periksa platform sebelum mengirim ulang.'
+                        WHERE state='Mengirim' AND (claimed_at IS NULL OR claimed_at < now()-interval '30 minutes')""")
+                    db.execute("""INSERT INTO worker_status VALUES (1,now())
+                               ON CONFLICT(id) DO UPDATE SET seen=excluded.seen""")
+            worked = deliver() or worked
+        if ping:
             last_ping=time.monotonic()
-        if not deliver():
+        if not worked:
             time.sleep(3)
