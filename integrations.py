@@ -144,3 +144,45 @@ def send_waba(settings, local_identity, phone, body):
     if result.get("status") is not True or not str(message_id).isdecimal():
         raise RuntimeError("ID balasan BalasChat belum terkonfirmasi.")
     return {"message_id": str(message_id)}
+
+
+def starsender_message(payload):
+    if payload.get("is_group") or payload.get("is_me") or payload.get("chat_type") == "group":
+        return None
+    sender = str(payload["from"])
+    if "@" in sender and not sender.endswith(("@s.whatsapp.net", "@c.us")):
+        return None
+    phone = sender.split("@", 1)[0].removeprefix("+")
+    if phone.startswith("0"):
+        phone = "62" + phone[1:]
+    body = payload["message"]
+    if not re.fullmatch(r"[1-9][0-9]{6,14}", phone) or not isinstance(body, str) or not body.strip():
+        raise ValueError("Pesan pribadi StarSender tidak valid.")
+    stamp = str(payload["timestamp"])
+    if stamp.isdecimal():
+        seconds = int(stamp)
+        if seconds >= 100_000_000_000:
+            seconds /= 1000
+        when = datetime.fromtimestamp(seconds, timezone.utc)
+    else:
+        when = datetime.fromisoformat(stamp)
+    if when.utcoffset() is None:
+        raise ValueError("Timestamp StarSender harus memuat zona waktu.")
+    stamp = when.astimezone(timezone.utc).isoformat()
+    fingerprint = hashlib.sha256(json.dumps([phone, stamp, body], ensure_ascii=False).encode()).hexdigest()
+    mid = str(payload.get("message_id") or fingerprint)
+    if len(mid) > 256:
+        raise ValueError("ID pesan StarSender tidak valid.")
+    return {"id": phone, "participants": {"data": [{"id": phone, "name": str(payload.get("push_name") or phone)[:180]}]},
+            "messages": {"data": [{"id": mid, "from": {"id": phone}, "created_time": stamp, "message": body}]}}
+
+
+def send_starsender(settings, local_identity, phone, body):
+    token = settings.get("token")
+    if not isinstance(token, str) or not token or settings.get("device_id") != local_identity:
+        raise ValueError("Perangkat StarSender ini tidak aktif.")
+    result = provider_request("POST", "https://api.starsender.online/api/send", token, "StarSender",
+                              headers={"Authorization": token},
+                              json={"messageType": "text", "to": phone, "body": body})
+    if result.get("success") is not True:
+        raise RuntimeError("Pengiriman StarSender belum terkonfirmasi.")

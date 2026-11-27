@@ -29,6 +29,18 @@ TAYSRIUL_BALASCHAT='{"1":{"workspace":"bisnis-a","phone_number_id":"123456789","
 
 Tambahkan webhook di BalasChat dengan URL `https://DOMAIN_TAYSRiUL/integrasi/WID/balaschat`. Setelah memperoleh signing secret, isi konfigurasi lalu redeploy. Gunakan signing secret yang berbeda untuk setiap bisnis. Aktifkan event pesan masuk lalu jalankan **Send test**. Webhook memeriksa tanda tangan dan mencocokkan workspace serta nomor WABA sebelum menyimpan pesan. Pesan muncul di **Inbox & layanan** dan dapat ditugaskan, diberi tag, atau ditutup. Balasan teks tersedia selama 24 jam sejak pesan terakhir pelanggan. Status awal mengikuti penerimaan API. Status baca, sinkronisasi pesan yang dikirim di dashboard BalasChat, dan pesan template di luar jendela 24 jam berada di luar cakupan rilis ini.
 
+## StarSender untuk WhatsApp
+
+Hubungkan perangkat di dashboard StarSender, lalu ambil Device API Key dan ID perangkat. Atur satu perangkat StarSender per workspace Taysriul. Gunakan perangkat atau nomor berbeda jika Anda juga mengaktifkan BalasChat pada bisnis yang sama.
+
+```dotenv
+TAYSRIUL_STARSENDER='{"1":{"device_id":"ID_DEVICE","token":"DEVICE_API_KEY","secret":"GANTI_DENGAN_TOKEN_ACAK_MINIMAL_32_KARAKTER"}}'
+```
+
+Buat secret dengan `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Atur URL webhook pesan masuk pada perangkat StarSender menjadi `https://DOMAIN/integrasi/WID/starsender/SECRET`. Ganti WID dengan ID workspace Taysriul dan SECRET dengan nilai di konfigurasi. Batasi akses ke URL ini dan sensor nilainya di log reverse proxy. Webhook standar yang terdokumentasi memuat pengirim, teks, dan timestamp. Taysriul memvalidasi secret unik per workspace, serta mencocokkan ID perangkat jika payload menyertakannya.
+
+Kirim pesan teks pribadi ke nomor tersebut. Percakapan muncul di **Inbox & layanan** sebagai **WhatsApp · StarSender**. Balas dari inbox dan cek status **Diterima API**. Status ini menunjukkan API menerima permintaan. Pengujian penerimaan di ponsel tetap diperlukan karena dokumentasi API tidak menyertakan konfirmasi sampai atau dibaca dalam respons kirim. Paket ini mencakup chat pribadi dan balasan teks. Jika webhook membawa ID pesan, Taysriul memakai ID tersebut untuk deduplikasi. Untuk webhook dasar, deduplikasi memakai pengirim, timestamp dan teks.
+
 ## Penjadwalan massal
 
 Di **Buat post**, centang setiap akun yang boleh dipakai di batch. Unggah CSV UTF-8 maksimal 100 materi. Kolom `targets` opsional. Pakai ID yang tampil di editor, pisahkan dengan spasi. Nilai kosong memakai semua akun yang dicentang. Waktu mengikuti WIB. Kolom `asset` memakai ID media dari workspace yang sedang aktif. Sistem mengikuti aturan persetujuan workspace dan membatalkan seluruh batch jika ada baris yang gagal validasi.
@@ -42,7 +54,7 @@ Informasi jam buka,2027-01-16T10:00,,oauth:7
 ## Rencana 5 langkah
 
 1. Jalankan suite PostgreSQL di staging dan uji migrasi dari salinan database aktif.
-2. Hubungkan satu akun Tebar dan satu nomor WABA untuk satu bisnis. Uji satu kiriman, satu pesan masuk, dan satu balasan.
+2. Hubungkan satu akun Tebar dan satu perangkat StarSender atau satu nomor WABA untuk satu bisnis. Uji satu kiriman, satu pesan masuk, dan satu balasan.
 3. Masukkan bisnis lain bertahap. Uji pergantian workspace, izin tim, dan batch CSV dengan akun tujuan berbeda.
 4. Tambahkan tautan unik per kampanye serta tag prospek di inbox untuk mengukur percakapan yang bisa dikaitkan ke promosi.
 5. Buat ringkasan pemilik lintas bisnis untuk hasil publikasi, jumlah chat terbuka, waktu respons pertama, dan prospek. Tinjau hasilnya setiap bulan.
@@ -53,3 +65,5 @@ Informasi jam buka,2027-01-16T10:00,,oauth:7
 - [Tebar API Post](https://docs.tebar.app/api/posts/)
 - [BalasChat webhook](https://doc.balaschat.my.id/docs/webhook-balaschat/)
 - [BalasChat WABA](https://doc.balaschat.my.id/docs/api-whatsapp-business-waba/)
+- [StarSender API kirim pesan](https://docs.starsender.online/docs/message-api/kirim-pesan/)
+- [StarSender webhook](https://docs.starsender.online/docs/webhook/)

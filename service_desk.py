@@ -141,6 +141,35 @@ def register(app,connect):
         return "", 204
 
 
+    @app.post("/integrasi/<int:wid>/starsender/<secret>")
+    def starsender_webhook(wid, secret):
+        request.max_content_length = 256 * 1024
+        settings = integrations.config("STARSENDER", wid)
+        expected = settings.get("secret")
+        device = settings.get("device_id")
+        if not isinstance(expected, str) or len(expected) < 32 or not secrets.compare_digest(expected.encode(), secret.encode()):
+            abort(403)
+        if not integrations.valid_id(device):
+            abort(403)
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            abort(400)
+        if payload.get("device_id") is not None and str(payload["device_id"]) != device:
+            abort(403)
+        try:
+            thread = integrations.starsender_message(payload)
+        except (KeyError, ValueError, TypeError, OverflowError, OSError):
+            abort(400)
+        if thread is None:
+            return "", 204
+        with connect() as db:
+            aid = db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential)
+                VALUES('starsender',%s,'WhatsApp · StarSender',public.pgp_sym_encrypt('{}',%s))
+                ON CONFLICT(platform,external_id) DO UPDATE SET title=excluded.title RETURNING id""",
+                (device,app.secret_key)).fetchone()["id"]
+            ingest(db, aid, "", thread, source="StarSender")
+        return "", 204
+
     @app.get("/layanan")
     def desk():
         selected=request.args.get("thread",type=int)
@@ -148,7 +177,7 @@ def register(app,connect):
         if status not in ("all","open","done"): abort(400)
         with connect() as db:
             agents=eligible(db)
-            accounts=db.execute("SELECT a.id,a.title,a.active,a.platform,p.after_cursor FROM oauth_accounts a LEFT JOIN desk_pages p ON p.account=a.id WHERE platform IN ('facebook','balaschat_waba') ORDER BY title").fetchall()
+            accounts=db.execute("SELECT a.id,a.title,a.active,a.platform,p.after_cursor FROM oauth_accounts a LEFT JOIN desk_pages p ON p.account=a.id WHERE platform IN ('facebook','balaschat_waba','starsender') ORDER BY title").fetchall()
             query=request.args.get("q","").strip()[:160]
             account=request.args.get("account",type=int)
             rows=db.execute("""SELECT t.*,c.name,a.title,u.login FROM desk_threads t JOIN desk_contacts c ON t.contact=c.id
@@ -158,7 +187,7 @@ def register(app,connect):
                 EXISTS(SELECT 1 FROM desk_messages m WHERE m.thread=t.id AND strpos(lower(m.body),lower(%s))>0))
                 ORDER BY t.last_message DESC NULLS LAST,t.id DESC LIMIT 200""",(account,account,status,status,query,query)).fetchall()
             selected=selected or (rows[0]["id"] if rows else None)
-            current=db.execute("""SELECT t.*,c.name,c.notes,c.external_id,c.account,a.title,a.active,a.platform,u.login
+            current=db.execute("""SELECT t.*,c.name,c.notes,c.external_id,c.account,a.title,a.active,a.platform,a.external_id AS device_id,u.login
                 FROM desk_threads t JOIN desk_contacts c ON c.id=t.contact JOIN oauth_accounts a ON a.id=c.account
                 LEFT JOIN public.studio_users u ON u.id=t.owner_id WHERE t.id=%s""",(selected,)).fetchone()
             if selected and not current: abort(404)
@@ -171,11 +200,13 @@ def register(app,connect):
                 FROM desk_threads t LEFT JOIN public.studio_users u ON u.id=t.owner_id GROUP BY 1 ORDER BY 1""").fetchall()
             notices=db.execute("SELECT * FROM desk_events WHERE recipient=%s AND NOT seen ORDER BY id DESC LIMIT 50",(session.get("user"),)).fetchall()
         local=datetime.now(ZoneInfo("Asia/Jakarta")).time()
+        starsender = integrations.config("STARSENDER", g.workspace_id)
         return render_template("studio.html",page="layanan",threads=rows,current=current,messages=messages,events=events,
             agents=agents,accounts=accounts,replies=replies,policy=policy,reports=reports,notices=notices,
             office_open=policy["opens"]<=local<policy["closes"],nonce=secrets.token_urlsafe(24),
             send_enabled=os.getenv("FACEBOOK_MESSENGER_ENABLED")=="1",
-            waba_enabled=bool(integrations.config("BALASCHAT", g.workspace_id).get("token")))
+            waba_enabled=bool(integrations.config("BALASCHAT", g.workspace_id).get("token")),
+            starsender_device=starsender.get("device_id") if starsender.get("token") else None)
 
     @app.post("/layanan/pengaturan")
     def desk_settings():
@@ -238,7 +269,11 @@ def register(app,connect):
                 db.execute("UPDATE desk_threads SET human_control=true WHERE id=%s",(tid,))
                 if not row["active"]: abort(403)
                 is_waba = row["platform"] == "balaschat_waba"
-                if is_waba:
+                is_starsender = row["platform"] == "starsender"
+                if is_starsender:
+                    settings = integrations.config("STARSENDER", g.workspace_id)
+                    if not settings.get("token") or settings.get("device_id") != row["page_id"]: abort(403)
+                elif is_waba:
                     settings = integrations.config("BALASCHAT", g.workspace_id)
                     if not settings.get("token"): abort(403)
                     recent = db.execute("""SELECT 1 FROM desk_messages WHERE thread=%s AND NOT outbound
@@ -251,7 +286,7 @@ def register(app,connect):
                 body=request.form.get("body","").strip()
                 nonce=request.form.get("nonce","")
                 if not 1<=len(body)<=2000 or not 20<=len(nonce)<=80: abort(400)
-                if not is_waba:
+                if not (is_waba or is_starsender):
                     secret=db.execute("SELECT public.pgp_sym_decrypt(credential,%s) AS value FROM oauth_accounts WHERE id=%s AND active FOR SHARE",(app.secret_key,row["account"])).fetchone()
                     if not secret: abort(409)
                     token=json.loads(secret["value"])["access_token"]
@@ -261,6 +296,13 @@ def register(app,connect):
             else: abort(400)
         if action=="send":
             try:
+                if is_starsender:
+                    integrations.send_starsender(settings, row["page_id"], row["external_id"], body)
+                    with connect() as db:
+                        db.execute("UPDATE desk_messages SET state='Diterima API' WHERE id=%s",(pending["id"],))
+                        db.execute("UPDATE desk_threads SET last_message=greatest(last_message,now()) WHERE id=%s",(tid,))
+                        log(db,tid,"Balasan diterima API StarSender")
+                    return redirect(url_for("desk",thread=tid))
                 if is_waba:
                     result = integrations.send_waba(settings, row["page_id"], row["external_id"], body)
                 else:

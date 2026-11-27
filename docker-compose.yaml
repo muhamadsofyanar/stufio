@@ -17,6 +17,7 @@ services:
     environment: &social_runtime
       <<: *runtime
       TAYSRIUL_TEBAR: ${TAYSRIUL_TEBAR:-}
+      TAYSRIUL_STARSENDER: ${TAYSRIUL_STARSENDER:-}
       TAYSRIUL_BALASCHAT: ${TAYSRIUL_BALASCHAT:-}
       SOCIAL_ORIGIN: ${SOCIAL_ORIGIN:-}
       INSTAGRAM_CONFIG_ID: ${INSTAGRAM_CONFIG_ID:-}

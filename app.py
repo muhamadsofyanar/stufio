@@ -181,7 +181,7 @@ def telegram(token, method, data, files=None):
 
 @app.before_request
 def protect():
-    if request.endpoint in {"integration_comment", "balaschat_webhook"}:
+    if request.endpoint in {"integration_comment", "balaschat_webhook", "starsender_webhook"}:
         g.workspace_id=request.view_args["wid"]
         validate_public_workspace(g.workspace_id)
         return
@@ -260,7 +260,7 @@ def dashboard(page="ringkasan"):
         with connect() as db:
             channels = db.execute("SELECT id,title,platform,active FROM channels ORDER BY active DESC,title,id").fetchall()
             accounts = db.execute("""SELECT id,platform,title,external_id,active,publish_ready,sync_result,synced_at,(expires_at <= now() AND NOT refreshable) AS expired
-                                      FROM oauth_accounts WHERE platform <> 'balaschat_waba' ORDER BY title, id""").fetchall()
+                                      FROM oauth_accounts WHERE platform NOT IN ('balaschat_waba','starsender') ORDER BY title, id""").fetchall()
         providers = [(key, provider, bool(social_oauth.settings(key)))
                      for key in social_oauth.PROVIDERS for provider in [social_oauth.provider_for(key)]]
         return render_template("studio.html", page=page, channels=channels,

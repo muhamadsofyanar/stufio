@@ -46,3 +46,22 @@ class IntegrationTests(unittest.TestCase):
             sent = integrations.send_waba(settings, "bisnis:123456789", "6281234567890", "Halo")
             self.assertEqual(sent, {"message_id": "5"})
             self.assertEqual(call.call_args.kwargs["json"]["channel"], "waba")
+
+    def test_starsender_normalizes_sender_and_deduplicates_standard_webhook(self):
+        event = {"from": "6281234567890@s.whatsapp.net", "message": "Halo", "timestamp": 1700000000}
+        first = integrations.starsender_message(event)
+        second = integrations.starsender_message(dict(event, timestamp=1700000000000))
+        self.assertEqual(first, second)
+        self.assertEqual(first["id"], "6281234567890")
+        self.assertIsNone(integrations.starsender_message(dict(event, is_me=True)))
+        self.assertIsNone(integrations.starsender_message(dict(event, **{"from": "123@g.us"})))
+
+    def test_starsender_uses_raw_device_key_and_requires_success(self):
+        settings = {"token": "device-key", "device_id": "device-one"}
+        with patch("integrations.provider_request", return_value={"success": True}) as send:
+            integrations.send_starsender(settings, "device-one", "6281234567890", "Halo")
+            self.assertEqual(send.call_args.kwargs["headers"], {"Authorization": "device-key"})
+            self.assertEqual(send.call_args.kwargs["json"], {"messageType": "text", "to": "6281234567890", "body": "Halo"})
+            send.return_value = {"success": False}
+            with self.assertRaises(RuntimeError):
+                integrations.send_starsender(settings, "device-one", "6281234567890", "Halo")
