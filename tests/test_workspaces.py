@@ -235,3 +235,64 @@ class WorkspaceTests(unittest.TestCase):
             row=db.execute("SELECT synced_at,sync_result FROM oauth_accounts WHERE id=1").fetchone()
             self.assertIsNotNone(row["synced_at"])
             self.assertEqual(row["sync_result"],"inbox: gagal")
+
+    def seed_targets(self):
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            for cid in (-1,-2):
+                db.execute("INSERT INTO channels(id,title,token) VALUES(%s,%s,public.pgp_sym_encrypt('test',%s))",
+                           (cid,f"Akun {cid}",self.studio.app.secret_key))
+
+    def test_review_variants_revision_and_week(self):
+        self.seed_targets()
+        self.post("/media", photo=(io.BytesIO(b"\x89PNG\r\n\x1a\nfixture"),"foto.png"))
+        self.post("/pengaturan",action="approval",enabled="1")
+        form=dict(body="Materi",channel=["-1","-2"],asset="1",due="2027-02-01T08:00",
+                  **{"caption_-2":"Versi dua","media_-2":"none"})
+        self.post("/buat",action="draft",nonce=secrets.token_urlsafe(),**form)
+        self.assertIn(b"Versi dua",self.client.get("/buat?draft=1").data)
+        for action in ("revise","approve"):
+            self.post("/buat",draft="1",nonce=secrets.token_urlsafe(),**form)
+            self.assertIn(b"Setujui dan jadwalkan",self.client.get("/studio/draf").data)
+            with self.studio.raw_connection() as db:
+                self.studio.set_workspace(db,self.space)
+                self.assertFalse(db.execute("SELECT 1 FROM posts WHERE state='Terjadwal'").fetchone())
+            self.assertEqual(self.post("/editorial/1/review",action=action,note="Catatan").status_code,302)
+        self.assertEqual(self.post("/editorial/1/review",action="approve").status_code,409)
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            rows=db.execute("SELECT body,photo IS NOT NULL AS media FROM posts WHERE state='Terjadwal' ORDER BY id").fetchall()
+            self.assertEqual(rows,[{"body":"Materi","media":True},{"body":"Versi dua","media":False}])
+        self.assertIn(b"Versi dua",self.client.get("/kalender?week=2027-02-03&account=-2").data)
+        self.assertNotIn(b"Versi dua",self.client.get("/kalender?week=2027-02-12").data)
+        self.assertEqual(self.post("/editorial/1/copy").status_code,302)
+
+    def test_bulk_rollback_replay_and_target_retry(self):
+        self.seed_targets()
+        nonce=secrets.token_urlsafe()
+        def upload(contents):
+            return self.post("/buat",action="bulk",nonce=nonce,channel=["-1","-2"],
+                             csv=(io.BytesIO(contents.encode()),"materi.csv"))
+        upload("caption,due,asset\nPertama,,\nKedua,salah,")
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            self.assertFalse(db.execute("SELECT 1 FROM posts").fetchone())
+        for _ in range(2):
+            upload("caption,due,asset\nPertama,,\nKedua,,")
+        ctx=self.studio.worker_workspace.set(self.space)
+        self.addCleanup(self.studio.worker_workspace.reset,ctx)
+        sent={"message_id":22,"chat":{"username":"test"}}
+        with patch.object(self.studio,"telegram",side_effect=[ValueError("Ditolak"),sent,sent,sent,sent]) as provider:
+            for _ in range(4): self.assertTrue(self.studio.deliver())
+            with self.studio.connect() as db:
+                failed=db.execute("SELECT id FROM posts WHERE state='Gagal'").fetchone()["id"]
+                succeeded=db.execute("SELECT id FROM posts WHERE state='Terbit' LIMIT 1").fetchone()["id"]
+                event=db.execute("SELECT max(id) AS id FROM job_events WHERE post_id=%s",(failed,)).fetchone()["id"]
+            self.post(f"/posts/{succeeded}",action="retry",event=event)
+            self.post(f"/posts/{failed}",action="retry",event=event)
+            self.assertTrue(self.studio.deliver())
+            self.assertFalse(self.studio.deliver())
+            self.assertEqual(provider.call_count,5)
+        with self.studio.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) AS n FROM posts WHERE state='Terbit'").fetchone()["n"],4)
+            self.assertEqual(db.execute("SELECT count(*) AS n FROM job_events WHERE post_id=%s AND state='Mengirim'",(failed,)).fetchone()["n"],2)

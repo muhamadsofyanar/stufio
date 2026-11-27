@@ -19,7 +19,9 @@ def register(app, connect, prepare_schema, record_event):
         with connect() as db:
             if request.method == "POST":
                 action = request.form.get("action")
-                if action in {"rename", "create"}:
+                if action=="approval":
+                    db.execute("UPDATE editorial_settings SET approval=%s WHERE id=1",(request.form.get("enabled")=="1",))
+                elif action in {"rename", "create"}:
                     name = request.form.get("name", "").strip()
                     if not 1 <= len(name) <= 100:
                         abort(400)
@@ -60,10 +62,11 @@ def register(app, connect, prepare_schema, record_event):
                     record_event(db, action, login if action in {"member", "remove"} else g.workspace_id)
                 flash("Pengaturan tersimpan.")
                 return redirect("/pengaturan")
+            approval=db.execute("SELECT approval FROM editorial_settings WHERE id=1").fetchone()["approval"]
             events = db.execute("SELECT * FROM admin_events ORDER BY id DESC LIMIT 50").fetchall()
             members = db.execute("""SELECT login,role FROM public.memberships JOIN public.studio_users ON member=id
                 WHERE workspace=%s ORDER BY login""", (g.workspace_id,)).fetchall()
-        return render_template("studio.html", page="pengaturan", members=members, events=events)
+        return render_template("studio.html", page="pengaturan", members=members, events=events, approval=approval)
 
     @app.route("/aktivitas/<any(inbox,analitik):page>")
     def activity(page):

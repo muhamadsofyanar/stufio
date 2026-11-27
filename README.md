@@ -1,6 +1,6 @@
-# Taysriul | Tahap 1
+# Taysriul | Rilis publikasi, Tahap 1–4
 
-Versi aplikasi berbasis Stufio. Ringkasan perubahan dan hasil pengujian tersedia di TAHAP-1.md.
+Panduan perubahan dan pemeriksaan sebelum deploy tersedia di RILIS-PUBLIKASI.md.
 
 Aplikasi Flask/Jinja untuk mengelola akun sosial, menulis draf, dan menjadwalkan publikasi per workspace. Gunicorn melayani web, PostgreSQL menyimpan media serta antrean, dan proses worker mengirim kiriman. Antarmuka berbahasa Indonesia dengan jadwal WIB.
 

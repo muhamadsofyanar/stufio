@@ -1,5 +1,6 @@
 {% if page=='pengaturan' %}
 <h1>Tim & pengaturan</h1>
+<form method="post" class="card">{{csrf()}}<label><input type="checkbox" name="enabled" value="1" {{'checked' if approval}}> Wajibkan persetujuan sebelum publikasi</label><small>Materi yang sudah diajukan tetap menunggu keputusan peninjau.</small><button name="action" value="approval">Simpan kebijakan editorial</button></form>
 <form method="post" class="card">{{csrf()}}<label>Nama workspace<input name="name" maxlength="100" required value="{{g.workspace_name}}"></label><button name="action" value="rename">Simpan nama</button></form>
 <details><summary>Riwayat administrasi</summary>{% for event in events %}<p>{{event.happened.strftime('%d/%m/%Y %H:%M %Z')}} · {{event.actor}} · {{event.action}} · {{event.target}}</p>{% else %}<p>Belum ada perubahan tercatat.</p>{% endfor %}</details>
 <h2>Daftar workspace</h2>{% for w in g.workspaces %}<form action="/workspace/switch" class="account-row card" method="post">{{csrf()}}<strong>{{w.name}}</strong><input type="hidden" name="workspace" value="{{w.id}}">{% if w.id==g.workspace_id %}<small>Aktif</small>{% else %}<button class="secondary">Buka workspace</button>{% endif %}</form>{% endfor %}<h2>Anggota workspace</h2>

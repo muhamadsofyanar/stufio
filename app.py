@@ -1,4 +1,6 @@
 import calendar
+import csv
+import io
 from contextvars import ContextVar
 from werkzeug.security import check_password_hash
 from psycopg import sql
@@ -56,6 +58,9 @@ def connect():
 
 
 def prepare_schema(db, wid):
+    if db.execute("SELECT 1 FROM public.workspace_migrations WHERE workspace=%s AND version=1",(wid,)).fetchone():
+        set_workspace(db,wid)
+        return
     schema = sql.Identifier(schema_for(wid))
     db.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
     set_workspace(db, wid)
@@ -66,12 +71,19 @@ def prepare_schema(db, wid):
       id bigserial PRIMARY KEY, channel bigint NOT NULL REFERENCES channels,
       body text NOT NULL, photo bytea, due timestamptz NOT NULL,
       state text NOT NULL DEFAULT 'Terjadwal', note text, link text);
+    CREATE TABLE IF NOT EXISTS editorial_settings(id int PRIMARY KEY CHECK(id=1), approval boolean NOT NULL DEFAULT false);
+    INSERT INTO editorial_settings VALUES(1,false) ON CONFLICT DO NOTHING;
+    CREATE TABLE IF NOT EXISTS job_events(id bigserial PRIMARY KEY, post_id bigint NOT NULL REFERENCES posts,
+        happened timestamptz DEFAULT now(), state text NOT NULL, note text);
     ALTER TABLE channels ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT 'Telegram';
     ALTER TABLE channels ADD COLUMN IF NOT EXISTS guild text;
     ALTER TABLE channels ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
     CREATE TABLE IF NOT EXISTS assets(id bigserial PRIMARY KEY,name text NOT NULL,photo bytea NOT NULL);
     CREATE TABLE IF NOT EXISTS editorial(id bigserial PRIMARY KEY,body text NOT NULL,stage text NOT NULL,
                                          asset bigint REFERENCES assets);
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS editorial_id bigint REFERENCES editorial;
+    CREATE TABLE IF NOT EXISTS editorial_history(id bigserial PRIMARY KEY, item bigint REFERENCES editorial,
+        happened timestamptz DEFAULT now(), actor text NOT NULL, stage text NOT NULL, note text NOT NULL DEFAULT '');
     ALTER TABLE editorial ADD COLUMN IF NOT EXISTS composer jsonb NOT NULL DEFAULT '{}';
     CREATE TABLE IF NOT EXISTS shortlinks(slug text PRIMARY KEY, destination text NOT NULL,
       title text NOT NULL, clicks bigint NOT NULL DEFAULT 0);
@@ -106,11 +118,14 @@ def prepare_schema(db, wid):
     ALTER TABLE activity ADD COLUMN IF NOT EXISTS reply_body text;
     CREATE TABLE IF NOT EXISTS submissions(nonce text PRIMARY KEY, created timestamptz DEFAULT now());""")
 
+    db.execute("INSERT INTO public.workspace_migrations(workspace,version) VALUES(%s,1)",(wid,))
+
 
 with raw_connection() as db:
     db.execute("SELECT pg_advisory_xact_lock(782391)")
     db.execute("""CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
         CREATE TABLE IF NOT EXISTS public.workspaces(id bigserial PRIMARY KEY, name text NOT NULL);
+        CREATE TABLE IF NOT EXISTS public.workspace_migrations(workspace bigint REFERENCES public.workspaces,version int NOT NULL,PRIMARY KEY(workspace,version));
         CREATE TABLE IF NOT EXISTS public.studio_users(id bigserial PRIMARY KEY, login text UNIQUE NOT NULL, password_hash text NOT NULL);
         CREATE TABLE IF NOT EXISTS public.memberships(workspace bigint REFERENCES public.workspaces, member bigint REFERENCES public.studio_users,
             role text NOT NULL CHECK(role IN ('manager','editor','viewer')), PRIMARY KEY(workspace,member));""")
@@ -250,16 +265,17 @@ def dashboard(page="ringkasan"):
         if page == "buat":
             media = media_list(db)
             if request.args.get("draft",type=int):
-                draft=db.execute("SELECT * FROM editorial WHERE id=%s AND stage='Draf'",(request.args.get("draft",type=int),)).fetchone()
+                draft=db.execute("SELECT * FROM editorial WHERE id=%s AND stage IN ('Draf','Perlu Revisi')",(request.args.get("draft",type=int),)).fetchone()
                 if not draft:
                     abort(404)
+        approval = db.execute("SELECT approval FROM editorial_settings WHERE id=1").fetchone()["approval"]
         heartbeat = db.execute("SELECT seen > now()-interval '90 seconds' AS active FROM worker_status WHERE id=1").fetchone() if page=="ringkasan" else None
         totals = db.execute("""SELECT count(*) FILTER (WHERE state='Terjadwal') AS queued,
                             count(*) FILTER (WHERE state='Terbit') AS sent,
                             count(*) FILTER (WHERE state IN ('Gagal','Periksa channel')) AS issues
                             FROM posts""").fetchone()
         month = request.args.get("month") or datetime.now(WIB).strftime("%Y-%m")
-        weeks, day_counts = [], {}
+        weeks, day_counts, calendar_dates = [], {}, {}
         account_filter = request.args.get("account","") if page=="kalender" else ""
         key_expr = "CASE WHEN oauth_id IS NULL THEN channel::text ELSE 'oauth:'||oauth_id::text END"
         if page == "kalender":
@@ -268,18 +284,32 @@ def dashboard(page="ringkasan"):
                 end = (first + timedelta(days=32)).replace(day=1)
             except (ValueError, OverflowError):
                 abort(400)
-            weeks = calendar.monthcalendar(first.year, first.month)
+            week = request.args.get("week")
+            if week:
+                try:
+                    chosen = datetime.strptime(week,"%Y-%m-%d").replace(tzinfo=WIB)
+                    first = chosen - timedelta(days=chosen.weekday())
+                    end = first + timedelta(days=7)
+                except (ValueError, OverflowError):
+                    abort(400)
+                weeks = [[(first+timedelta(days=i)).day for i in range(7)]]
+            else:
+                weeks = calendar.monthcalendar(first.year, first.month)
+            calendar_dates={(first+timedelta(days=i)).day:(first+timedelta(days=i)).date().isoformat() for i in range((end-first).days)}
             day_counts = {row["day"]:row["n"] for row in db.execute("""SELECT extract(day FROM due AT TIME ZONE 'Asia/Jakarta')::int AS day,count(*) AS n
                 FROM posts WHERE due >= %s AND due < %s AND (%s='' OR """+key_expr+"""=%s) GROUP BY 1""", (first,end,account_filter,account_filter))}
-        posts = db.execute("""SELECT p.id,body,due,state,note,link,COALESCE(c.title,p.target_title,'Akun dilepas') AS title FROM posts p
+        posts = db.execute("""SELECT p.id,p.editorial_id,body,due,state,note,link,COALESCE(c.title,p.target_title,'Akun dilepas') AS title FROM posts p
                             LEFT JOIN channels c ON p.channel=c.id
                             WHERE (%s <> 'terbit' OR state='Terbit') AND (%s <> 'kalender' OR (due >= %s AND due < %s)) AND (%s='' OR CASE WHEN oauth_id IS NULL THEN channel::text ELSE 'oauth:'||oauth_id::text END=%s) ORDER BY (state='Terjadwal') DESC,
                             CASE WHEN state='Terjadwal' THEN due END ASC,due DESC LIMIT 200""",(page,page,first if weeks else None,end if weeks else None,account_filter,account_filter)).fetchall()
+        logs={}
+        for event in db.execute("SELECT id,post_id,state,note,happened FROM job_events WHERE post_id=ANY(%s) ORDER BY id DESC",([p["id"] for p in posts],)):
+            logs.setdefault(event["post_id"],[]).append(event)
     for post in posts:
         post["local"] = post["due"].astimezone(WIB)
     if page=="kalender":
         posts.sort(key=lambda p:p["local"])
-    return render_template("studio.html", page=page, channels=channels, posts=posts, totals=totals, draft=draft, media=media, heartbeat=heartbeat, weeks=weeks, month=month, day_counts=day_counts, nonce=secrets.token_urlsafe(18))
+    return render_template("studio.html", page=page, channels=channels, posts=posts, logs=logs, totals=totals, draft=draft, media=media, approval=approval, heartbeat=heartbeat, weeks=weeks, calendar_dates=calendar_dates, month=month, day_counts=day_counts, nonce=secrets.token_urlsafe(18))
 
 
 @app.post("/akun")
@@ -395,7 +425,7 @@ def disconnect_oauth(account_id):
             (app.secret_key,account_id)).fetchone()
         if not changed:
             abort(404)
-        db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE oauth_id=%s AND state='Terjadwal'", (account_id,))
+        db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE oauth_id=%s AND state IN ('Terjadwal','Diajukan')", (account_id,))
         record_event(db, "Lepas OAuth", account_id)
     flash("Akun dilepas. Jadwal yang masih menunggu dibatalkan.")
     return redirect("/akun")
@@ -408,7 +438,7 @@ def disconnect_channel(channel):
         account=db.execute("SELECT id FROM channels WHERE id=%s AND active FOR UPDATE",(int(channel),)).fetchone()
         if not account: abort(404)
         db.execute("UPDATE channels SET active=false,token=public.pgp_sym_encrypt('',%s) WHERE id=%s",(app.secret_key,account["id"]))
-        db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE channel=%s AND state='Terjadwal'",(account["id"],))
+        db.execute("UPDATE posts SET state='Dibatalkan',note='Akun dilepas' WHERE channel=%s AND state IN ('Terjadwal','Diajukan')",(account["id"],))
         record_event(db, "Lepas channel", channel)
     flash("Akun dilepas. Jadwal yang masih menunggu dibatalkan.")
     return redirect("/akun")
@@ -458,9 +488,11 @@ STAGES = ("Ide", "Dikerjakan", "Siap", "Draf")
 @app.route("/studio/<any(ide,media,draf):page>")
 def library_page(page):
     with connect() as db:
-        items = db.execute("SELECT id,body,stage FROM editorial WHERE stage <> 'Dipakai' ORDER BY id DESC").fetchall() if page != "media" else []
+        items = db.execute("SELECT id,body,stage,composer FROM editorial WHERE stage <> 'Dipakai' ORDER BY id DESC").fetchall() if page != "media" else []
+        events=db.execute("SELECT item,actor,stage,note,happened FROM editorial_history ORDER BY id DESC LIMIT 300").fetchall() if page=="draf" else []
+        pending=db.execute("SELECT editorial_id,body,photo IS NOT NULL AS media, due,COALESCE(c.title,p.target_title) AS title FROM posts p LEFT JOIN channels c ON c.id=p.channel WHERE state='Diajukan' ORDER BY p.id").fetchall() if page=="draf" else []
         media = media_list(db) if page == "media" else []
-    return render_template("studio.html", page=page, items=items, media=media, stages=STAGES)
+    return render_template("studio.html", page=page, items=items, media=media, stages=STAGES,events=events,pending=pending)
 
 
 def media_list(db):
@@ -512,7 +544,7 @@ def save_idea():
         abort(400)
     with connect() as db:
         if request.form.get("id"):
-            db.execute("UPDATE editorial SET body=%s, stage=%s WHERE id=%s AND stage <> 'Dipakai'",
+            db.execute("UPDATE editorial SET body=%s, stage=%s WHERE id=%s AND stage IN ('Ide','Dikerjakan','Siap','Draf')",
                        (body,stage,int(request.form["id"])))
         else:
             db.execute("INSERT INTO editorial(body,stage) VALUES(%s,%s)",(body,stage))
@@ -538,97 +570,192 @@ def add_discord():
     return redirect("/akun")
 
 
+def asset_data(db, identity):
+    if not str(identity).isdecimal() or len(str(identity)) > 18:
+        raise ValueError("ID media tidak valid.")
+    row=db.execute("SELECT photo FROM assets WHERE id=%s",(int(identity),)).fetchone()
+    if not row:
+        raise ValueError("Media tidak tersedia di workspace ini.")
+    return row["photo"]
+
+
+def enqueue(db, item, body, base_photo, form):
+    targets=form["targets"]
+    overrides=form["captions"]
+    variants=form.get("media",{})
+    if not targets:
+        raise ValueError("Pilih minimal satu akun.")
+    due=read_due(form["due"])
+    cover=None
+    if form.get("cover"):
+        cover=asset_data(db,form["cover"])
+        if multi_publish.media_kind(bytes(cover))!="image":
+            raise ValueError("Cover harus berupa foto dari pustaka.")
+    for cid in targets:
+        photo = base_photo
+        selected = variants.get(cid)
+        if selected == "none":
+            photo = None
+        elif selected:
+            photo = asset_data(db, selected)
+        caption = overrides.get(cid, body)
+        if not caption and not photo:
+            raise ValueError("Setiap tujuan memerlukan caption atau media.")
+        if cid.startswith("oauth:"):
+            account_id = cid.removeprefix("oauth:")
+            if not account_id.isdecimal() or len(account_id)>18: raise ValueError("Akun tidak valid.")
+            account=db.execute("""SELECT id,title,platform FROM oauth_accounts WHERE id=%s AND publish_ready
+                AND (expires_at IS NULL OR expires_at > now() OR refreshable) FOR SHARE""",(int(account_id),)).fetchone()
+            if not account: raise ValueError("Akun OAuth belum siap; sambungkan ulang.")
+            multi_publish.validate(account["platform"],caption,bytes(photo or b""))
+            if account["platform"]=="pinterest" and multi_publish.media_kind(bytes(photo or b""))=="video" and not cover:
+                raise ValueError("Pilih foto cover untuk video Pinterest.")
+            options={}
+            if account["platform"]=="youtube":
+                privacy=form.get("youtube_privacy","private")
+                kids=form.get("youtube_kids","")
+                if privacy not in {"public","unlisted","private"} or kids not in {"yes","no"}:
+                    raise ValueError("Pilih visibilitas dan audiens anak YouTube.")
+                options={"privacy":privacy,"kids":kids=="yes"}
+            job=db.execute("INSERT INTO posts(editorial_id,oauth_id,target_title,body,photo,due,cover,publish_options) VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
+                       (item,account["id"],account["title"],caption,photo,due,cover if account["platform"]=="pinterest" else None,json.dumps(options)))
+        else:
+            if not re.fullmatch(r"-?[0-9]{1,19}",cid): raise ValueError("Akun tidak valid.")
+            account=db.execute("SELECT platform FROM channels WHERE id=%s AND active FOR SHARE",(int(cid),)).fetchone()
+            if not account: raise ValueError("Akun tidak tersedia.")
+            multi_publish.validate(account["platform"],caption,bytes(photo or b""))
+            job=db.execute("INSERT INTO posts(editorial_id,channel,body,photo,due) VALUES(%s,%s,%s,%s,%s) RETURNING id",(item,int(cid),caption,photo,due))
+        db.execute("INSERT INTO job_events(post_id,state) VALUES(%s,'Terjadwal')",(job.fetchone()["id"],))
+
+
+def history(db, item, stage, note=""):
+    actor = "Admin utama" if session.get("admin") else f"Pengguna {session['user']}"
+    db.execute("INSERT INTO editorial_history(item,actor,stage,note) VALUES(%s,%s,%s,%s)",(item,actor,stage,note))
+
+
+def save_material(db, body, asset, form, draft, action, approval):
+    if not body and not asset and not any(form["captions"].values()) and not any(v!="none" for v in form["media"].values()):
+        raise ValueError("Tulis pesan atau pilih media.")
+    if draft and not db.execute("SELECT id FROM editorial WHERE id=%s AND stage IN ('Draf','Perlu Revisi') FOR UPDATE",(draft,)).fetchone():
+        raise ValueError("Draf ini sudah diproses.")
+    stage = "Draf" if action=="draft" else "Diajukan" if approval else "Dipakai"
+    values=(body,asset,json.dumps(form),stage)
+    if draft:
+        db.execute("UPDATE editorial SET body=%s,asset=%s,composer=%s,stage=%s WHERE id=%s",(*values,draft))
+        item=draft
+    else:
+        item=db.execute("INSERT INTO editorial(body,asset,composer,stage) VALUES(%s,%s,%s,%s) RETURNING id",values).fetchone()["id"]
+    if stage!="Draf":
+        enqueue(db,item,body,asset_data(db,asset) if asset else None,form)
+        if approval:
+            db.execute("UPDATE posts SET state='Diajukan' WHERE editorial_id=%s AND state='Terjadwal'",(item,))
+            db.execute("UPDATE job_events SET state='Diajukan' WHERE post_id IN (SELECT id FROM posts WHERE editorial_id=%s AND state='Diajukan')",(item,))
+    history(db,item,stage if stage!="Dipakai" else "Terjadwal")
+    return stage
+
+
 @app.post("/buat")
 def create():
-    body = request.form["body"].strip()
-    targets = list(dict.fromkeys(request.form.getlist("channel")))
-    overrides = {cid:request.form.get("caption_"+cid,"").strip() for cid in targets if request.form.get("caption_"+cid,"").strip()}
-    draft = request.form.get("draft", type=int)
+    draft=request.form.get("draft",type=int)
+    action=request.form.get("action","publish")
+    if action not in ("draft","publish","bulk"): abort(400)
+    targets=list(dict.fromkeys(request.form.getlist("channel")))
+    form={key:request.form.get(key,"") for key in ("due","cover","youtube_kids")}
+    form["youtube_privacy"]=request.form.get("youtube_privacy","private")
+    form["targets"]=targets
+    form["captions"]={cid:request.form["caption_"+cid].strip() for cid in targets if request.form.get("caption_"+cid,"").strip()}
+    form["media"]={cid:request.form["media_"+cid] for cid in targets if request.form.get("media_"+cid)}
     try:
-        photo = photo_upload()
+        photo=photo_upload()
         with connect() as db:
             nonce=request.form.get("nonce","")
-            if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}",nonce):
-                abort(400)
-            claimed=db.execute("INSERT INTO submissions(nonce) VALUES (%s) ON CONFLICT DO NOTHING",(nonce,))
-            if not claimed.rowcount:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}",nonce): abort(400)
+            if not db.execute("INSERT INTO submissions VALUES(%s,now()) ON CONFLICT DO NOTHING",(nonce,)).rowcount:
                 flash("Permintaan ini sudah diproses.")
                 return redirect("/kalender")
-            if draft and not db.execute("SELECT id FROM editorial WHERE id=%s AND stage='Draf' FOR UPDATE",(draft,)).fetchone():
-                raise ValueError("Draf ini sudah diproses.")
-            aid = request.form.get("asset",type=int)
+            approval=db.execute("SELECT approval FROM editorial_settings WHERE id=1 FOR SHARE").fetchone()["approval"]
+            asset=request.form.get("asset",type=int)
             if photo:
-                aid=db.execute("INSERT INTO assets(name,photo) VALUES(%s,%s) RETURNING id",
-                               (request.files["photo"].filename[:180],photo)).fetchone()["id"]
-            elif aid:
-                row=db.execute("SELECT photo FROM assets WHERE id=%s",(aid,)).fetchone()
-                if not row:
-                    raise ValueError("Foto tidak tersedia.")
-                photo=row["photo"]
-            if not body and not photo and not (targets and all(cid in overrides for cid in targets)):
-                raise ValueError("Tulis pesan atau pilih foto.")
-            if request.form.get("action")=="draft":
-                composer = json.dumps(dict(targets=targets, captions=overrides, **{key:request.form.get(key,"") for key in ("due","cover","youtube_privacy","youtube_kids")}))
-                if draft:
-                    db.execute("UPDATE editorial SET body=%s,asset=%s,composer=%s::jsonb WHERE id=%s",(body,aid,composer,draft))
-                else:
-                    db.execute("INSERT INTO editorial(body,asset,stage,composer) VALUES(%s,%s,'Draf',%s::jsonb)",(body,aid,composer))
-                flash("Draf tersimpan.")
-                return redirect("/studio/draf")
-            if not targets:
-                raise ValueError("Pilih minimal satu akun.")
-            due=read_due(request.form["due"])
-            cover=None
-            if request.form.get("cover",type=int):
-                row=db.execute("SELECT photo FROM assets WHERE id=%s",(request.form.get("cover",type=int),)).fetchone()
-                if not row or multi_publish.media_kind(bytes(row["photo"]))!="image":
-                    raise ValueError("Cover harus berupa foto dari pustaka.")
-                cover=row["photo"]
-            for cid in targets:
-                caption = overrides.get(cid, body)
-                if cid.startswith("oauth:"):
-                    account_id = cid.removeprefix("oauth:")
-                    if not account_id.isdecimal(): raise ValueError("Akun tidak valid.")
-                    account=db.execute("""SELECT id,title,platform FROM oauth_accounts WHERE id=%s AND publish_ready
-                        AND (expires_at IS NULL OR expires_at > now() OR refreshable) FOR SHARE""",(int(account_id),)).fetchone()
-                    if not account: raise ValueError("Akun OAuth belum siap; sambungkan ulang.")
-                    multi_publish.validate(account["platform"],caption,bytes(photo or b""))
-                    if account["platform"]=="pinterest" and multi_publish.media_kind(bytes(photo or b""))=="video" and not cover:
-                        raise ValueError("Pilih foto cover untuk video Pinterest.")
-                    options={}
-                    if account["platform"]=="youtube":
-                        privacy=request.form.get("youtube_privacy","private")
-                        kids=request.form.get("youtube_kids","")
-                        if privacy not in {"public","unlisted","private"} or kids not in {"yes","no"}:
-                            raise ValueError("Pilih visibilitas dan audiens anak YouTube.")
-                        options={"privacy":privacy,"kids":kids=="yes"}
-                    db.execute("INSERT INTO posts(oauth_id,target_title,body,photo,due,cover,publish_options) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
-                               (account["id"],account["title"],caption,photo,due,cover if account["platform"]=="pinterest" else None,json.dumps(options)))
-                else:
-                    if not re.fullmatch(r"-?[0-9]{1,19}",cid): raise ValueError("Akun tidak valid.")
-                    account=db.execute("SELECT platform FROM channels WHERE id=%s AND active FOR SHARE",(int(cid),)).fetchone()
-                    if not account: raise ValueError("Akun tidak tersedia.")
-                    multi_publish.validate(account["platform"],caption,bytes(photo or b""))
-                    db.execute("INSERT INTO posts(channel,body,photo,due) VALUES(%s,%s,%s,%s)",(int(cid),caption,photo,due))
-            if draft:
-                db.execute("UPDATE editorial SET stage='Dipakai' WHERE id=%s",(draft,))
-        flash("Kiriman masuk antrean.")
-        return redirect("/kalender")
-    except ValueError as err:
+                asset=db.execute("INSERT INTO assets(name,photo) VALUES(%s,%s) RETURNING id",(request.files["photo"].filename[:180],photo)).fetchone()["id"]
+            if action=="bulk":
+                if draft: abort(400)
+                upload=request.files.get("csv")
+                if not upload: raise ValueError("Pilih berkas CSV.")
+                records=csv.DictReader(io.StringIO(upload.read(500001).decode("utf-8-sig")),strict=True)
+                if upload.tell()>500000 or records.fieldnames != ["caption","due","asset"]:
+                    raise ValueError("Gunakan CSV UTF-8 hingga 500 KB dengan header caption,due,asset.")
+                count=0
+                for count,row in enumerate(records,1):
+                    if count>100 or None in row or None in row.values(): raise ValueError("CSV harus berisi maksimal 100 materi dengan tiga kolom.")
+                    entry=dict(form,captions={},media={},due=row["due"].strip())
+                    try:
+                        identity=row["asset"].strip()
+                        if identity and (not identity.isdecimal() or len(identity)>18): raise ValueError("ID media tidak valid.")
+                        stage=save_material(db,row["caption"].strip(),int(identity) if identity else None,entry,None,"publish",approval)
+                    except ValueError as err:
+                        raise ValueError(f"Materi {count}: {err}") from err
+                if not count: raise ValueError("CSV kosong.")
+            else:
+                for value in form["media"].values():
+                    if value!="none": asset_data(db,value)
+                stage=save_material(db,request.form.get("body","").strip(),asset,form,draft,action,approval)
+        flash({"Dipakai":"Kiriman masuk antrean.","Diajukan":"Materi masuk antrean persetujuan.","Draf":"Draf tersimpan."}[stage])
+        return redirect("/kalender" if stage=="Dipakai" else "/studio/draf")
+    except (ValueError,csv.Error) as err:
         flash(str(err))
-        return redirect("/buat" + (f"?draft={draft}" if draft else ""))
+        return redirect("/buat"+(f"?draft={draft}" if draft else ""))
 
 
 @app.post("/posts/<int:pid>")
 def change(pid):
     with connect() as db:
-        if request.form["action"]=="cancel":
+        if request.form["action"]=="retry":
+            changed=db.execute("""UPDATE posts SET state='Terjadwal',due=now(),note=NULL,claimed_at=NULL
+                WHERE id=%s AND state='Gagal' AND %s=(SELECT COALESCE(max(id),0) FROM job_events WHERE post_id=%s)""",
+                (pid,request.form.get("event",type=int),pid))
+        elif request.form["action"]=="cancel":
             changed=db.execute("UPDATE posts SET state='Dibatalkan' WHERE id=%s AND state='Terjadwal'",(pid,))
-        else:
+        elif request.form["action"]=="save":
             changed=db.execute("UPDATE posts SET due=%s WHERE id=%s AND state='Terjadwal'",
                                (read_due(request.form["due"]),pid))
+        else:
+            abort(400)
+        if changed.rowcount:
+            db.execute("INSERT INTO job_events(post_id,state,note) SELECT id,state,%s FROM posts WHERE id=%s",(request.form["action"],pid))
         flash("Jadwal diperbarui." if changed.rowcount else "Postingan sudah diproses.")
     return redirect("/kalender")
+
+@app.post("/editorial/<int:item>/review")
+def review(item):
+    if g.role not in ("owner","manager"): abort(403)
+    action=request.form.get("action")
+    note=request.form.get("note","").strip()
+    if action not in ("approve","revise") or len(note)>2000 or (action=="revise" and not note): abort(400)
+    with connect() as db:
+        row=db.execute("SELECT stage FROM editorial WHERE id=%s FOR UPDATE",(item,)).fetchone()
+        if not row or row["stage"]!="Diajukan": abort(409)
+        stage="Terjadwal" if action=="approve" else "Perlu Revisi"
+        if action=="approve" and not db.execute("SELECT 1 FROM posts WHERE editorial_id=%s AND state='Diajukan'",(item,)).fetchone():
+            flash("Semua tujuan sudah dibatalkan. Minta revisi untuk memilih akun baru.")
+            return redirect("/studio/draf")
+        if action=="approve":
+            history(db,item,"Disetujui",note)
+        jobs=db.execute("UPDATE posts SET state=%s WHERE editorial_id=%s AND state='Diajukan' RETURNING id",
+            (stage if action=="approve" else "Dibatalkan",item)).fetchall()
+        for job in jobs:
+            db.execute("INSERT INTO job_events(post_id,state,note) VALUES(%s,%s,%s)",(job["id"],stage,note))
+        db.execute("UPDATE editorial SET stage=%s WHERE id=%s",("Dipakai" if action=="approve" else stage,item))
+        history(db,item,stage,note)
+    return redirect("/studio/draf")
+
+
+@app.post("/editorial/<int:item>/copy")
+def copy_material(item):
+    with connect() as db:
+        row=db.execute("INSERT INTO editorial(body,asset,composer,stage) SELECT body,asset,composer-'due','Draf' FROM editorial WHERE id=%s RETURNING id",(item,)).fetchone()
+        if not row: abort(404)
+    return redirect(f"/buat?draft={row['id']}")
+
 
 def validate_public_workspace(wid):
     with raw_connection() as db:
@@ -671,6 +798,7 @@ def deliver():
         if not item:
             return False
         db.execute("UPDATE posts SET state='Mengirim',claimed_at=now() WHERE id=%s",(item["id"],))
+        db.execute("INSERT INTO job_events(post_id,state) VALUES(%s,'Mengirim')",(item["id"],))
     data={"chat_id":item["channel"]}
     link=None
     note=None
@@ -727,6 +855,7 @@ def deliver():
         state,note="Periksa channel","Respons API tidak dikenali; cek platform sebelum ulang."
     with connect() as db:
         db.execute("UPDATE posts SET state=%s,note=%s,link=%s WHERE id=%s",(state,note,link,item["id"]))
+        db.execute("INSERT INTO job_events(post_id,state,note) VALUES(%s,%s,%s)",(item["id"],state,note))
     return True
 
 

@@ -13,8 +13,15 @@ function refreshPreview() {
   byId('cover_options').hidden=!targets.some(t=>t.dataset.platform==='pinterest');
   byId('youtube_visibility_options').hidden=!targets.some(t=>t.dataset.platform==='youtube');
   byId('youtube_kids_options').hidden=byId('youtube_visibility_options').hidden;
+  function mediaFor(target) {
+    const select=byId('compose').elements.namedItem('media_'+target.value);
+    if (!select?.value) return {kind,src};
+    if (select.value==='none') return {kind:'text',src:''};
+    return {kind:select.selectedOptions[0].dataset.kind,src:'/media/'+select.value+'?ws='+byId('compose').dataset.workspace};
+  }
   const issues=[];
   for(const target of targets){
+    const {kind,src}=mediaFor(target);
     const key=target.dataset.platform;
     const caption=byId('compose').elements.namedItem('caption_'+target.value)?.value.trim()||text;
     const max=key==='Telegram'?(kind==='text'?4096:1024):(limits[key]||4096);
@@ -24,13 +31,14 @@ function refreshPreview() {
     if(key==='pinterest'&&kind==='video'&&!byId('cover').value)issues.push('Pilih cover video Pinterest.');
     if(key==='youtube'&&(!caption||caption.split('\n')[0].length>100))issues.push('YouTube memerlukan judul hingga 100 karakter.');
     if(key==='youtube'&&!byId('youtube_kids').value)issues.push('Pilih audiens YouTube.');
-    if(key==='instagram'&&file&&kind==='image'&&file.type!=='image/jpeg')issues.push('Instagram memerlukan JPEG.');
+    if(key==='instagram'&&src===mediaURL&&file&&kind==='image'&&file.type!=='image/jpeg')issues.push('Instagram memerlukan JPEG.');
   }
   if(file&&file.size>(kind==='video'?32:8)*1024*1024)issues.push('Ukuran media terlalu besar.');
   const previews=byId('previews');
   previews.replaceChildren();
   if(!targets.length) previews.textContent='Pilih akun untuk melihat pratinjau.';
   for(const target of targets){
+    const {kind,src}=mediaFor(target);
     const card=document.createElement('article');
     const platform=document.createElement('small');
     platform.textContent=target.dataset.platform;
@@ -53,7 +61,7 @@ function refreshPreview() {
   byId('counter').textContent=length+' / '+limit+' karakter · '+targets.length+' tujuan';
   byId('validation').textContent=issues.join(' ');
   byId('send').disabled=!targets.length||issues.length>0;
-  byId('send').textContent=byId('due').value?'Jadwalkan':'Kirim sekarang';
+  byId('send').textContent=byId('compose').dataset.approval==='1'?'Ajukan untuk persetujuan':byId('due').value?'Jadwalkan':'Kirim sekarang';
 }
 byId('compose').addEventListener('input',refreshPreview);
 document.querySelectorAll('[data-view]').forEach(tab=>tab.onclick=()=>{document.querySelector('.split').dataset.pane=tab.dataset.view;document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed',String(b===tab)));});
