@@ -1,4 +1,7 @@
 <h1>Inbox & layanan</h1>
+{% if starsender_device %}<section class="card"><h2>WhatsApp · StarSender</h2><p>Perangkat {{starsender_device}} · Pesan masuk otomatis melalui webhook.</p>
+<p>{% if hook and hook.received %}{{hook.received.strftime('%d/%m/%Y %H:%M:%S')}} WIB · {{hook.hook_status}}{% else %}Menunggu webhook baru untuk diperiksa.{% endif %}</p>
+<a href="{{url_for('desk')}}">Perbarui inbox</a></section>{% endif %}
 <p>Messenger dan WhatsApp · {{'Dalam' if office_open else 'Di luar'}} jam layanan {{policy.opens.strftime('%H:%M')}}–{{policy.closes.strftime('%H:%M')}} WIB</p>
 {% if notices %}<details open><summary>Notifikasi saya ({{notices|length}})</summary>{% for e in notices %}<p><a href="?thread={{e.thread}}">#{{e.thread}}</a> · {{e.detail}}</p>{% endfor %}<form action="/layanan/notifikasi" method="post">{{csrf()}}<button>Tandai dibaca</button></form></details>{% endif %}
 {% if g.role!='viewer' %}<details><summary>Sinkronkan akun Messenger</summary>{% for a in accounts if a.active and a.platform=='facebook' %}<form method="post" action="/aktivitas/inbox/{{a.id}}/sync">{{csrf()}}<input type="hidden" name="desk" value="1"><button class="secondary">{{a.title}} · #{{a.id}}</button>{% if a.after_cursor %}<button name="more" value="1">Ambil percakapan berikutnya</button>{% endif %}</form>{% else %}<p>Hubungkan Facebook Page untuk mengambil pesan.</p>{% endfor %}</details>{% endif %}

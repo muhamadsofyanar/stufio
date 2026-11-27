@@ -25,10 +25,15 @@ def store_starsender(db, key, settings):
         ON CONFLICT(id) DO UPDATE SET settings=excluded.settings""",(json.dumps(settings),key))
 
 
+def webhook_status(db, status):
+    db.execute("UPDATE starsender_settings SET last_hook=now(),hook_status=%s WHERE id=1",(status,))
+
+
 def migrate_starsender(db, wid, key):
     if db.execute("SELECT 1 FROM public.workspace_migrations WHERE workspace=%s AND version=4",(wid,)).fetchone():
+        db.execute("ALTER TABLE starsender_settings ADD COLUMN IF NOT EXISTS last_hook timestamptz, ADD COLUMN IF NOT EXISTS hook_status text")
         return
-    db.execute("CREATE TABLE starsender_settings(id integer PRIMARY KEY CHECK(id=1),settings bytea NOT NULL)")
+    db.execute("CREATE TABLE starsender_settings(id integer PRIMARY KEY CHECK(id=1),settings bytea NOT NULL,last_hook timestamptz,hook_status text)")
     old = integrations.config("STARSENDER", wid)
     if old:
         store_starsender(db,key,old)
@@ -195,16 +200,24 @@ def register(app,connect):
             abort(403)
         if not integrations.valid_id(device):
             abort(403)
-        payload = request.get_json(silent=True)
+        payload = request.get_json(force=True,silent=True)
         if not isinstance(payload, dict):
+            with connect() as db:
+                webhook_status(db,"Format JSON tidak terbaca")
             abort(400)
         if payload.get("device_id") is not None and str(payload["device_id"]) != device:
+            with connect() as db:
+                webhook_status(db,"Device ID berbeda dari pengaturan")
             abort(403)
         try:
             thread = integrations.starsender_message(payload)
         except (KeyError, ValueError, TypeError, OverflowError, OSError):
+            with connect() as db:
+                webhook_status(db,"Format pengirim, pesan atau waktu perlu diperiksa")
             abort(400)
         if thread is None:
+            with connect() as db:
+                webhook_status(db,"Pesan grup atau pesan keluar dilewati")
             return "", 204
         with connect() as db:
             aid = db.execute("""INSERT INTO oauth_accounts(platform,external_id,title,credential)
@@ -212,6 +225,7 @@ def register(app,connect):
                 ON CONFLICT(platform,external_id) DO UPDATE SET title=excluded.title RETURNING id""",
                 (device,app.secret_key)).fetchone()["id"]
             ingest(db, aid, "", thread, source="StarSender")
+            webhook_status(db,"Pesan masuk diterima")
         return "", 204
 
     @app.get("/layanan")
@@ -246,7 +260,8 @@ def register(app,connect):
         local=datetime.now(ZoneInfo("Asia/Jakarta")).time()
         with connect() as db:
             starsender = starsender_settings(db, app.secret_key)
-        return render_template("studio.html",page="layanan",threads=rows,current=current,messages=messages,events=events,
+            hook = db.execute("SELECT last_hook AT TIME ZONE 'Asia/Jakarta' AS received,hook_status FROM starsender_settings WHERE id=1").fetchone()
+        return render_template("studio.html",page="layanan",hook=hook,threads=rows,current=current,messages=messages,events=events,
             agents=agents,accounts=accounts,replies=replies,policy=policy,reports=reports,notices=notices,
             office_open=policy["opens"]<=local<policy["closes"],nonce=secrets.token_urlsafe(24),
             send_enabled=os.getenv("FACEBOOK_MESSENGER_ENABLED")=="1",
