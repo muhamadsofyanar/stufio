@@ -66,6 +66,7 @@ def prepare_schema(db, wid):
         set_workspace(db,wid)
         service_desk.migrate(db,wid)
         workflows.migrate(db,wid)
+        service_desk.migrate_starsender(db,wid,app.secret_key)
         return
     schema = sql.Identifier(schema_for(wid))
     db.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
@@ -127,6 +128,7 @@ def prepare_schema(db, wid):
     db.execute("INSERT INTO public.workspace_migrations(workspace,version) VALUES(%s,1)",(wid,))
     service_desk.migrate(db,wid)
     workflows.migrate(db,wid)
+    service_desk.migrate_starsender(db,wid,app.secret_key)
 
 
 with raw_connection() as db:
@@ -258,13 +260,18 @@ def dashboard(page="ringkasan"):
         abort(403)
     if page == "akun":
         with connect() as db:
+            starsender = service_desk.starsender_settings(db,app.secret_key) if g.role in ("owner","manager") else {}
+            hook = None
+            if starsender.get("secret"):
+                origin = (os.getenv("SOCIAL_ORIGIN") or request.url_root).rstrip("/")
+                hook = f"{origin}/integrasi/{g.workspace_id}/starsender/{starsender['secret']}"
             channels = db.execute("SELECT id,title,platform,active FROM channels ORDER BY active DESC,title,id").fetchall()
             accounts = db.execute("""SELECT id,platform,title,external_id,active,publish_ready,sync_result,synced_at,(expires_at <= now() AND NOT refreshable) AS expired
                                       FROM oauth_accounts WHERE platform NOT IN ('balaschat_waba','starsender') ORDER BY title, id""").fetchall()
         providers = [(key, provider, bool(social_oauth.settings(key)))
                      for key in social_oauth.PROVIDERS for provider in [social_oauth.provider_for(key)]]
         return render_template("studio.html", page=page, channels=channels,
-                               social_accounts=accounts, providers=providers,
+                               social_accounts=accounts, providers=providers, starsender_device=starsender.get("device_id"), starsender_hook=hook,
                                provider_labels={key: provider.label for key, provider, _ in providers})
     with connect() as db:
         channels = db.execute("SELECT id,title,platform FROM channels WHERE active ORDER BY title").fetchall()

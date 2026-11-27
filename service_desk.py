@@ -15,6 +15,26 @@ from social_oauth import api
 MESSAGE_FIELDS = "id,from,message,created_time,attachments{id,name,mime_type,image_data,video_data,file_url}"
 
 
+def starsender_settings(db, key):
+    row = db.execute("SELECT public.pgp_sym_decrypt(settings,%s) AS value FROM starsender_settings WHERE id=1",(key,)).fetchone()
+    return json.loads(row["value"]) if row else {}
+
+
+def store_starsender(db, key, settings):
+    db.execute("""INSERT INTO starsender_settings(id,settings) VALUES(1,public.pgp_sym_encrypt(%s,%s))
+        ON CONFLICT(id) DO UPDATE SET settings=excluded.settings""",(json.dumps(settings),key))
+
+
+def migrate_starsender(db, wid, key):
+    if db.execute("SELECT 1 FROM public.workspace_migrations WHERE workspace=%s AND version=4",(wid,)).fetchone():
+        return
+    db.execute("CREATE TABLE starsender_settings(id integer PRIMARY KEY CHECK(id=1),settings bytea NOT NULL)")
+    old = integrations.config("STARSENDER", wid)
+    if old:
+        store_starsender(db,key,old)
+    db.execute("INSERT INTO public.workspace_migrations VALUES(%s,4)",(wid,))
+
+
 def migrate(db, wid):
     if db.execute("SELECT 1 FROM public.workspace_migrations WHERE workspace=%s AND version=2",(wid,)).fetchone():
         return
@@ -141,10 +161,34 @@ def register(app,connect):
         return "", 204
 
 
+    @app.post("/akun/starsender")
+    def configure_starsender():
+        if g.role not in ("owner","manager"):
+            abort(403)
+        device = request.form.get("device_id","").strip()
+        token = request.form.get("token","").strip()
+        with connect() as db:
+            db.execute("SELECT pg_advisory_xact_lock(%s)",(g.workspace_id,))
+            old = starsender_settings(db, app.secret_key)
+            if request.form.get("action") == "disable":
+                db.execute("DELETE FROM starsender_settings WHERE id=1")
+                flash("StarSender dinonaktifkan untuk bisnis ini.")
+                return redirect("/akun")
+            if device == old.get("device_id"):
+                token = token or old.get("token","")
+            if not integrations.valid_id(device) or not token or len(token)>4096 or any(c.isspace() for c in token):
+                flash("Masukkan Device ID dan Device API Key yang valid.")
+                return redirect("/akun")
+            secret = old.get("secret") if device == old.get("device_id") else None
+            store_starsender(db,app.secret_key,{"device_id":device,"token":token,"secret":secret or secrets.token_urlsafe(32)})
+        flash("Pengaturan StarSender tersimpan.")
+        return redirect("/akun")
+
     @app.post("/integrasi/<int:wid>/starsender/<secret>")
     def starsender_webhook(wid, secret):
         request.max_content_length = 256 * 1024
-        settings = integrations.config("STARSENDER", wid)
+        with connect() as db:
+            settings = starsender_settings(db, app.secret_key)
         expected = settings.get("secret")
         device = settings.get("device_id")
         if not isinstance(expected, str) or len(expected) < 32 or not secrets.compare_digest(expected.encode(), secret.encode()):
@@ -200,7 +244,8 @@ def register(app,connect):
                 FROM desk_threads t LEFT JOIN public.studio_users u ON u.id=t.owner_id GROUP BY 1 ORDER BY 1""").fetchall()
             notices=db.execute("SELECT * FROM desk_events WHERE recipient=%s AND NOT seen ORDER BY id DESC LIMIT 50",(session.get("user"),)).fetchall()
         local=datetime.now(ZoneInfo("Asia/Jakarta")).time()
-        starsender = integrations.config("STARSENDER", g.workspace_id)
+        with connect() as db:
+            starsender = starsender_settings(db, app.secret_key)
         return render_template("studio.html",page="layanan",threads=rows,current=current,messages=messages,events=events,
             agents=agents,accounts=accounts,replies=replies,policy=policy,reports=reports,notices=notices,
             office_open=policy["opens"]<=local<policy["closes"],nonce=secrets.token_urlsafe(24),
@@ -271,7 +316,7 @@ def register(app,connect):
                 is_waba = row["platform"] == "balaschat_waba"
                 is_starsender = row["platform"] == "starsender"
                 if is_starsender:
-                    settings = integrations.config("STARSENDER", g.workspace_id)
+                    settings = starsender_settings(db, app.secret_key)
                     if not settings.get("token") or settings.get("device_id") != row["page_id"]: abort(403)
                 elif is_waba:
                     settings = integrations.config("BALASCHAT", g.workspace_id)

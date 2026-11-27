@@ -31,13 +31,9 @@ Tambahkan webhook di BalasChat dengan URL `https://DOMAIN_TAYSRiUL/integrasi/WID
 
 ## StarSender untuk WhatsApp
 
-Hubungkan perangkat di dashboard StarSender, lalu ambil Device API Key dan ID perangkat. Atur satu perangkat StarSender per workspace Taysriul. Gunakan perangkat atau nomor berbeda jika Anda juga mengaktifkan BalasChat pada bisnis yang sama.
+Pilih workspace bisnis lalu buka **Akun sosial → WhatsApp · StarSender** sebagai pemilik atau pengelola. Masukkan Device ID dan Device API Key dari dashboard StarSender, lalu klik **Simpan StarSender**. Salin URL webhook yang muncul ke pengaturan webhook perangkat StarSender. Gunakan URL HTTPS publik aplikasi. Ulangi untuk tiap bisnis yang membutuhkan WhatsApp.
 
-```dotenv
-TAYSRIUL_STARSENDER='{"1":{"device_id":"ID_DEVICE","token":"DEVICE_API_KEY","secret":"GANTI_DENGAN_TOKEN_ACAK_MINIMAL_32_KARAKTER"}}'
-```
-
-Buat secret dengan `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Atur URL webhook pesan masuk pada perangkat StarSender menjadi `https://DOMAIN/integrasi/WID/starsender/SECRET`. Ganti WID dengan ID workspace Taysriul dan SECRET dengan nilai di konfigurasi. Batasi akses ke URL ini dan sensor nilainya di log reverse proxy. Webhook standar yang terdokumentasi memuat pengirim, teks, dan timestamp. Taysriul memvalidasi secret unik per workspace, serta mencocokkan ID perangkat jika payload menyertakannya.
+Aplikasi menyimpan pengaturan terenkripsi dengan APP_KEY. Migrasi membaca konfigurasi environment lama sekali jika tersedia. Perubahan berikutnya dilakukan lewat aplikasi. Menonaktifkan koneksi mencabut URL webhook workspace itu.
 
 Kirim pesan teks pribadi ke nomor tersebut. Percakapan muncul di **Inbox & layanan** sebagai **WhatsApp · StarSender**. Balas dari inbox dan cek status **Diterima API**. Status ini menunjukkan API menerima permintaan. Pengujian penerimaan di ponsel tetap diperlukan karena dokumentasi API tidak menyertakan konfirmasi sampai atau dibaca dalam respons kirim. Paket ini mencakup chat pribadi dan balasan teks. Jika webhook membawa ID pesan, Taysriul memakai ID tersebut untuk deduplikasi. Untuk webhook dasar, deduplikasi memakai pengirim, timestamp dan teks.
 

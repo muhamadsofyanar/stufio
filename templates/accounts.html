@@ -1,6 +1,16 @@
 <h1>Akun sosial</h1>
 <p class="muted">{{ (channels|length) + (social_accounts|length) }} akun tersimpan</p>
 
+{% if g.role in ('owner','manager') %}
+<details class="account-card"><summary><strong>WhatsApp · StarSender</strong><small>{{starsender_device or 'Hubungkan perangkat'}}</small></summary>
+<form action="/akun/starsender" method="post">{{csrf()}}
+<label>Device ID<input name="device_id" value="{{starsender_device or ''}}" required maxlength="128"></label>
+<label>Device API Key<input type="password" autocomplete="new-password" name="token" maxlength="4096" {{'required' if not starsender_device}}></label>
+{% if starsender_device %}<small>Kosongkan API Key untuk memakai kunci perangkat saat ini.</small>{% endif %}
+<button>Simpan StarSender</button></form>
+{% if starsender_hook %}<label>URL webhook untuk dashboard StarSender<input readonly value="{{starsender_hook}}"></label>
+<form action="/akun/starsender" method="post">{{csrf()}}<button class="secondary" name="action" value="disable">Nonaktifkan StarSender</button></form>{% endif %}</details>
+{% endif %}
 {% if g.role in ("owner","manager") %}<button type="button" data-open="accounts-dialog">＋ Hubungkan akun baru</button><dialog id="accounts-dialog"><header><h2>Hubungkan akun baru</h2><button type="button" data-close aria-label="Tutup">×</button></header>
 <div class="account-grid">
   <details class="account-card">
