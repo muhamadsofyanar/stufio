@@ -211,9 +211,9 @@ def register(app,connect):
             abort(403)
         try:
             thread = integrations.starsender_message(payload)
-        except (KeyError, ValueError, TypeError, OverflowError, OSError):
+        except ValueError as err:
             with connect() as db:
-                webhook_status(db,"Format pengirim, pesan atau waktu perlu diperiksa")
+                webhook_status(db,str(err))
             abort(400)
         if thread is None:
             with connect() as db:

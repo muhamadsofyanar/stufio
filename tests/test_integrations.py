@@ -65,3 +65,10 @@ class IntegrationTests(unittest.TestCase):
             send.return_value = {"success": False}
             with self.assertRaises(RuntimeError):
                 integrations.send_starsender(settings, "device-one", "6281234567890", "Halo")
+
+    def test_starsender_local_timestamp_and_missing_timestamp(self):
+        event = {"from": "6281234567890", "message": "Tes", "timestamp": "2026-11-27 17:40:40"}
+        message = integrations.starsender_message(event)["messages"]["data"][0]
+        self.assertEqual(message["created_time"], "2026-11-27T10:40:40+00:00")
+        del event["timestamp"]
+        self.assertIsNone(integrations.starsender_message(event)["messages"]["data"][0]["created_time"])
