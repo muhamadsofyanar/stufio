@@ -8,12 +8,6 @@ function refreshPreview() {
   if(file!==lastFile){if(mediaURL) URL.revokeObjectURL(mediaURL);mediaURL=file?URL.createObjectURL(file):'';lastFile=file;}
   const asset=byId('asset'), src=mediaURL||(asset.value&&'/media/'+asset.value+'?ws='+byId('compose').dataset.workspace);
   const kind=file?((file.type==='video/mp4'||/\.mp4$/i.test(file.name))?'video':'image'):(asset.value?asset.selectedOptions[0].dataset.kind:'text');
-  for(const [id,show] of [['pic',kind==='image'],['vid',kind==='video']]){
-    const el=byId(id);el.hidden=!show;
-    if(show&&src&&el.getAttribute('src')!==src)el.src=src;
-    else if(!show)el.removeAttribute('src');
-  }
-  byId('title').textContent=targets.map(el=>el.dataset.title).join(', ')||'Pilih akun tujuan';
   const text=byId('body').value.trim(), length=Array.from(text).length;
   const limit=Math.min(4096,...targets.map(el=>el.dataset.platform==='Telegram'?(kind==='text'?4096:1024):(limits[el.dataset.platform]||4096)));
   byId('cover_options').hidden=!targets.some(t=>t.dataset.platform==='pinterest');
@@ -33,7 +27,29 @@ function refreshPreview() {
     if(key==='instagram'&&file&&kind==='image'&&file.type!=='image/jpeg')issues.push('Instagram memerlukan JPEG.');
   }
   if(file&&file.size>(kind==='video'?32:8)*1024*1024)issues.push('Ukuran media terlalu besar.');
-  byId('copy').textContent=targets.map(t=>{const override=byId('compose').elements.namedItem('caption_'+t.value)?.value.trim();return override?t.dataset.title+' · '+override:null}).filter(Boolean).concat(text||[]).join('\n\n') || (src?'':'Pesan Anda akan tampil di sini.');
+  const previews=byId('previews');
+  previews.replaceChildren();
+  if(!targets.length) previews.textContent='Pilih akun untuk melihat pratinjau.';
+  for(const target of targets){
+    const card=document.createElement('article');
+    const platform=document.createElement('small');
+    platform.textContent=target.dataset.platform;
+    const title=document.createElement('h2');
+    title.textContent=target.dataset.title;
+    card.append(platform,title);
+    if(src){
+      const media=document.createElement(kind==='video'?'video':'img');
+      media.src=src;
+      if(kind==='video'){media.controls=true;media.preload='metadata';}
+      else media.alt='Pratinjau foto';
+      card.append(media);
+    }
+    const caption=document.createElement('p');
+    caption.className='body';
+    caption.textContent=byId('compose').elements.namedItem('caption_'+target.value)?.value.trim()||text||'Belum ada caption.';
+    card.append(caption);
+    previews.append(card);
+  }
   byId('counter').textContent=length+' / '+limit+' karakter · '+targets.length+' tujuan';
   byId('validation').textContent=issues.join(' ');
   byId('send').disabled=!targets.length||issues.length>0;

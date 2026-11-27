@@ -162,3 +162,34 @@ class WorkspaceTests(unittest.TestCase):
         with patch("meta_activity.api",return_value={"followers_count":241,"media_count":12}):
             self.post("/aktivitas/analitik/1/sync")
         self.assertIn(b"followers_count,241",self.client.get("/aktivitas/analitik?format=csv").data)
+
+    def test_daily_history_and_account_search(self):
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            for platform in ("instagram","facebook"):
+                db.execute("INSERT INTO oauth_accounts(platform,external_id,title,credential) VALUES(%s,'123',%s,public.pgp_sym_encrypt(%s,%s))",
+                           (platform,platform,'{"access_token":"fixture"}',self.studio.app.secret_key))
+            for account in (1,2):
+                db.execute("INSERT INTO activity(account,kind,external_id,label,body) VALUES(%s,'inbox','1','Reader',%s)",(account,f"post-{account}"))
+        for count in (123,157):
+            with patch("meta_activity.api",return_value={"followers_count":count}):
+                self.post("/aktivitas/analitik/1/sync")
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            self.assertEqual(db.execute("SELECT value FROM metric_days").fetchall(),[{"value":157}])
+        self.assertIn(b"157",self.client.get("/aktivitas/analitik?account=1").data)
+        html=self.client.get("/aktivitas/inbox?stream=messages&q=reader").data
+        self.assertIn(b"post-2",html)
+        self.assertNotIn(b"post-1",html)
+        self.assertNotIn(b"post-2",self.client.get("/aktivitas/inbox?stream=comments").data)
+
+    def test_feed_workspace_and_filters(self):
+        with self.studio.raw_connection() as db:
+            self.studio.set_workspace(db,self.space)
+            db.execute("INSERT INTO oauth_accounts(platform,external_id,title,credential) VALUES('threads','123','Threads test',public.pgp_sym_encrypt(%s,%s))",
+                       ('{"access_token":"fixture"}',self.studio.app.secret_key))
+        with patch.dict(os.environ,{"THREADS_FEED_ENABLED":"1"}), patch("workspace_views.api",return_value={"data":[{"username":"Writer","text":"Public example","media_type":"IMAGE"}]}) as api:
+            self.assertIn(b"Public example",self.client.get("/feed?q=test&account=1&media=IMAGE&order=RECENT").data)
+            self.assertEqual(api.call_args.kwargs["params"]["search_type"],"RECENT")
+            self.assertNotIn(b"Public example",self.client.get("/feed?q=test&media=VIDEO").data)
+            self.assertEqual(self.client.get("/feed?q=test&account=9999").status_code,404)

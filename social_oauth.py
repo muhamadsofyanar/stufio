@@ -76,6 +76,8 @@ def _base_provider(key):
 def provider_for(key):
     from dataclasses import replace
     provider = _base_provider(key)
+    if key=="threads" and os.getenv("THREADS_FEED_ENABLED")=="1":
+        provider=replace(provider,scope=provider.scope+",threads_keyword_search")
     if key=="threads" and os.getenv("THREADS_COMMENTS_ENABLED")=="1":
         return replace(provider,scope=provider.scope+",threads_read_replies,threads_manage_replies")
     if key=="instagram" and os.getenv("INSTAGRAM_COMMENTS_ENABLED")=="1":

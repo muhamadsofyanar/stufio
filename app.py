@@ -91,6 +91,8 @@ def prepare_schema(db, wid):
     CREATE TABLE IF NOT EXISTS oauth_attempts (
       state text PRIMARY KEY, platform text NOT NULL, session_hash text NOT NULL,
       verifier text NOT NULL, created timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS metric_days(account bigint REFERENCES oauth_accounts ON DELETE CASCADE, day date NOT NULL,
+        metric text NOT NULL, value numeric NOT NULL, PRIMARY KEY(account,day,metric));
     CREATE TABLE IF NOT EXISTS activity(account bigint REFERENCES oauth_accounts ON DELETE CASCADE,kind text NOT NULL,
         external_id text NOT NULL,label text NOT NULL,body text NOT NULL,video text,observed timestamptz DEFAULT now(),
         PRIMARY KEY(account,kind,external_id));
@@ -248,6 +250,8 @@ def dashboard(page="ringkasan"):
                             FROM posts""").fetchone()
         month = request.args.get("month") or datetime.now(WIB).strftime("%Y-%m")
         weeks, day_counts = [], {}
+        account_filter = request.args.get("account","") if page=="kalender" else ""
+        key_expr = "CASE WHEN oauth_id IS NULL THEN channel::text ELSE 'oauth:'||oauth_id::text END"
         if page == "kalender":
             try:
                 first = datetime.strptime(month, "%Y-%m").replace(tzinfo=WIB)
@@ -256,11 +260,11 @@ def dashboard(page="ringkasan"):
                 abort(400)
             weeks = calendar.monthcalendar(first.year, first.month)
             day_counts = {row["day"]:row["n"] for row in db.execute("""SELECT extract(day FROM due AT TIME ZONE 'Asia/Jakarta')::int AS day,count(*) AS n
-                FROM posts WHERE due >= %s AND due < %s GROUP BY 1""", (first,end))}
+                FROM posts WHERE due >= %s AND due < %s AND (%s='' OR """+key_expr+"""=%s) GROUP BY 1""", (first,end,account_filter,account_filter))}
         posts = db.execute("""SELECT p.id,body,due,state,note,link,COALESCE(c.title,p.target_title,'Akun dilepas') AS title FROM posts p
                             LEFT JOIN channels c ON p.channel=c.id
-                            WHERE (%s <> 'terbit' OR state='Terbit') AND (%s <> 'kalender' OR (due >= %s AND due < %s)) ORDER BY (state='Terjadwal') DESC,
-                            CASE WHEN state='Terjadwal' THEN due END ASC,due DESC LIMIT 200""",(page,page,first if weeks else None,end if weeks else None)).fetchall()
+                            WHERE (%s <> 'terbit' OR state='Terbit') AND (%s <> 'kalender' OR (due >= %s AND due < %s)) AND (%s='' OR CASE WHEN oauth_id IS NULL THEN channel::text ELSE 'oauth:'||oauth_id::text END=%s) ORDER BY (state='Terjadwal') DESC,
+                            CASE WHEN state='Terjadwal' THEN due END ASC,due DESC LIMIT 200""",(page,page,first if weeks else None,end if weeks else None,account_filter,account_filter)).fetchall()
     for post in posts:
         post["local"] = post["due"].astimezone(WIB)
     if page=="kalender":

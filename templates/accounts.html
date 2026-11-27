@@ -1,7 +1,7 @@
 <h1>Akun sosial</h1>
 <p class="muted">{{ (channels|length) + (social_accounts|length) }} akun tersimpan · Tanpa batas jumlah akun di Stufio</p>
 
-{% if g.role in ("owner","manager") %}<h2>Hubungkan akun baru</h2>
+{% if g.role in ("owner","manager") %}<button type="button" data-open="accounts-dialog">＋ Hubungkan akun baru</button><dialog id="accounts-dialog"><header><h2>Hubungkan akun baru</h2><button type="button" data-close aria-label="Tutup">×</button></header>
 <div class="account-grid">
   <details class="account-card">
     <summary><strong>Telegram</strong><small>Channel dan grup</small></summary>
@@ -36,7 +36,7 @@
   {% endfor %}
 </div>
 
-{% endif %}<h2 class="account-heading">Koneksi tersimpan</h2>
+</dialog>{% endif %}<h2 class="account-heading">Koneksi tersimpan</h2>
 {% for c in channels %}
 <article class="account-row"><strong>{{ c.title }}</strong><small>{{ c.platform }} · Siap untuk publikasi</small>{% if g.role in ("owner","manager") %}<form method="post" action="/akun/channel/{{c.id}}/lepas">{{csrf()}}<button class="secondary">Lepas dan batalkan jadwal</button></form>{% endif %}</article>
 {% endfor %}

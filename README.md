@@ -61,3 +61,11 @@ node --check static/composer.js
 ```
 
 Untuk menjalankan juga pengujian PostgreSQL, siapkan **database khusus uji kosong** dengan pgcrypto, arahkan PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD ke sana, isi APP_KEY dan ADMIN_PASSWORD khusus uji, lalu jalankan `STUFIO_TEST_DATABASE=1 python -m unittest discover -s tests -v`. Suite membuat workspace dan data uji. Frontend memakai Jinja, CSS, dan JavaScript yang langsung dilayani Flask.
+
+## Pembaruan antarmuka dan aktivitas
+
+Akun sosial dan Tautan menggunakan dialog. Editor menampilkan satu pratinjau untuk setiap tujuan yang dipilih. Kalender mendukung filter akun. Komentar dan pesan Messenger memiliki pintu masuk terpisah, filter status, pencarian, dan pilihan akun. Laporan menyimpan nilai per akun dan metrik setiap hari ketika pengguna melakukan sinkronisasi. Sinkronisasi berikutnya pada tanggal WIB yang sama memperbarui nilai hari itu. Tanggal laporan memfilter riwayat. Snapshot terkini dan unduhan CSV tetap menampilkan hasil terakhir. Hari tanpa sinkronisasi tidak diberi nilai.
+
+Feed Threads memerlukan THREADS_FEED_ENABLED=1, akses aplikasi ke threads_keyword_search, redeploy, dan penyambungan ulang akun. Pencarian menggunakan /keyword_search dengan TOP atau RECENT. Filter media diterapkan pada halaman hasil yang diterima. Tautan hasil membuka Threads untuk membalas. Dukungan pencarian topik khusus dan balasan feed langsung belum tersedia. Instagram DM dan undangan koneksi lintas perangkat belum tersedia.
+
+Pemeriksaan versi ini menggunakan PostgreSQL 16 dan respons API simulasi. Route, isolasi workspace, pencarian/penyaringan aktivitas, upsert snapshot harian dan pencarian Threads termasuk dalam 27 tes otomatis. Integrasi live serta deployment Docker menunggu verifikasi staging.

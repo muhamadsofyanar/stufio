@@ -1,4 +1,6 @@
 """Workspace administration and provider-backed activity."""
+from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
 import csv
 import io
 import json
@@ -64,11 +66,27 @@ def register(app, connect, prepare_schema):
         state = request.args.get("status","all")
         if state not in ("all","pending","done"):
             abort(400)
+        aid=request.args.get("account",type=int)
+        query=request.args.get("q","").strip()[:160]
+        stream=request.args.get("stream","all")
+        if stream not in ("all","comments","messages"): abort(400)
+        today=datetime.now(ZoneInfo("Asia/Jakarta")).date()
+        try:
+            start=date.fromisoformat(request.args.get("start") or str(today-timedelta(days=29)))
+            end=date.fromisoformat(request.args.get("end") or str(today))
+        except ValueError:
+            abort(400)
+        if start>end: abort(400)
         with connect() as db:
+            history=db.execute("""SELECT m.day,o.title,m.metric,m.value FROM metric_days m JOIN oauth_accounts o ON o.id=m.account
+                WHERE day BETWEEN %s AND %s AND (%s::bigint IS NULL OR account=%s)
+                ORDER BY day DESC,o.title,m.metric LIMIT 1000""",(start,end,aid,aid)).fetchall() if page=="analitik" else []
             rows = db.execute("""SELECT a.*, o.title,o.platform FROM activity a JOIN oauth_accounts o ON o.id=a.account
-                WHERE a.kind=%s AND (%s='all' OR (%s='done' AND a.reply_state='Terbalas')
+                WHERE a.kind=%s AND (%s::bigint IS NULL OR a.account=%s)
+                AND strpos(lower(a.label||' '||a.body||' '||o.title),lower(%s))>0
+                AND (%s='all' OR (%s='messages')=(o.platform='facebook')) AND (%s='all' OR (%s='done' AND a.reply_state='Terbalas')
                 OR (%s='pending' AND a.reply_state IS DISTINCT FROM 'Terbalas'))
-                ORDER BY a.observed DESC,a.external_id LIMIT 300""", (page,state,state,state)).fetchall()
+                ORDER BY a.observed DESC,a.external_id LIMIT 300""", (page,aid,aid,query,stream,stream,state,state,state)).fetchall()
             accounts = db.execute("SELECT id,title,platform FROM oauth_accounts WHERE platform IN ('youtube','facebook','instagram') OR (platform='threads' AND %s='inbox') ORDER BY title", (page,)).fetchall()
         if page == "analitik" and request.args.get("format") == "csv":
             output = io.StringIO()
@@ -78,7 +96,7 @@ def register(app, connect, prepare_schema):
                 title = row["title"]
                 writer.writerow([("'" if title.lstrip().startswith(("=", "+", "-", "@")) else "") + title, row["label"], row["body"], row["observed"]])
             return Response(output.getvalue(), mimetype="text/csv", headers={"Content-Disposition":"attachment; filename=stufio-report.csv"})
-        return render_template("studio.html", page=page, rows=rows, selected_state=state, sync_accounts=accounts, reply_enabled={key:os.getenv(flag)=="1" for key,flag in meta_activity.COMMENT_FLAGS.items()})
+        return render_template("studio.html", page=page, rows=rows, history=history,start=start,end=end,stream=stream,selected_state=state, sync_accounts=accounts, reply_enabled={key:os.getenv(flag)=="1" for key,flag in meta_activity.COMMENT_FLAGS.items()})
 
     @app.post("/aktivitas/<any(inbox,analitik):page>/<int:aid>/sync")
     def sync_activity(page, aid):
@@ -121,6 +139,10 @@ def register(app, connect, prepare_schema):
                     items = [(k,k,str(metrics[k]),None,None) for k in ("viewCount","subscriberCount","videoCount") if k in metrics and not (k=="subscriberCount" and metrics.get("hiddenSubscriberCount"))]
                 if page=="analitik":
                     db.execute("DELETE FROM activity WHERE account=%s AND kind=%s", (aid,page))
+                    for metric, _, value, _, _ in items:
+                        db.execute("""INSERT INTO metric_days(account,day,metric,value)
+                            VALUES(%s,(now() AT TIME ZONE 'Asia/Jakarta')::date,%s,%s)
+                            ON CONFLICT(account,day,metric) DO UPDATE SET value=excluded.value""",(aid,metric,value))
                 for external_id, label, body, video, reply_to in items:
                     db.execute("""INSERT INTO activity(account,kind,external_id,label,body,video,reply_to) VALUES (%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(account,kind,external_id) DO UPDATE SET label=excluded.label,body=excluded.body,observed=now(),video=excluded.video,reply_to=excluded.reply_to""",
@@ -167,3 +189,26 @@ def register(app, connect, prepare_schema):
             with connect() as db:
                 db.execute("UPDATE activity SET reply_state='Terbalas' WHERE account=%s AND kind='inbox' AND external_id=%s",(aid,item))
         return redirect("/aktivitas/inbox")
+
+    @app.get("/feed")
+    def feed():
+        query=request.args.get("q","").strip()[:160]
+        order=request.args.get("order","TOP")
+        media=request.args.get("media","")
+        if order not in ("TOP","RECENT") or media not in ("","TEXT_POST","IMAGE","VIDEO"): abort(400)
+        enabled=os.getenv("THREADS_FEED_ENABLED")=="1"
+        results=[]
+        with connect() as db:
+            accounts=db.execute("SELECT id,title FROM oauth_accounts WHERE platform='threads' ORDER BY title,id").fetchall()
+            if query and enabled and accounts:
+                row=db.execute("""SELECT public.pgp_sym_decrypt(credential,%s) AS token FROM oauth_accounts WHERE platform='threads' AND id=%s""",
+                    (app.secret_key,request.args.get("account",type=int) or accounts[0]["id"])).fetchone()
+                if not row: abort(404)
+                try:
+                    data=api("GET","https://graph.threads.net/v1.0/keyword_search",
+                        headers={"Authorization":"Bearer "+json.loads(row["token"])["access_token"]},
+                        params={"q":query,"search_type":order,"fields":"id,username,text,media_type,permalink,timestamp"})
+                    results=[r for r in data["data"] if not media or r.get("media_type")==media]
+                except (KeyError,ValueError,TypeError):
+                    flash("Pencarian gagal. Periksa izin pencarian Threads dan koneksi akun.")
+        return render_template("studio.html",page="feed",feed_accounts=accounts,enabled=enabled,results=results)
